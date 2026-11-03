@@ -72,7 +72,9 @@ class MainActivity : Activity() {
         val scans = prefs.getInt("scan_count", 0)
         val raw = prefs.getString("history", "[]") ?: "[]"
         val items = try { JSONArray(raw) } catch (_: Exception) { JSONArray() }
-        val out = StringBuilder("Total scans: $scans\nSaved text snapshots: ${items.length()}\n")
+        val frames = prefs.getInt("frames_received", 0)
+        val lastStatus = prefs.getString("last_status", "No capture diagnostics yet") ?: "No capture diagnostics yet"
+        val out = StringBuilder("Total scans: $scans\nFrames received: $frames\nSaved text snapshots: ${items.length()}\n\nLast capture status:\n$lastStatus\n")
         val formatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
         for (i in items.length() - 1 downTo 0) {
             val item = items.optJSONObject(i) ?: continue
