@@ -93,13 +93,20 @@ class CaptureService : Service() {
                     if (text.isNotBlank() && text != lastText) {
                         lastText = text
                         saveTextSnapshot(text)
-                        status?.post { status?.text = "Scans: $scans\nSaved text snapshots: ${prefs.getInt("history_count", 0)}\n\n" + text.take(650) }
-                    } else {
-                        status?.post { status?.text = "Scans: $scans\nSaved text snapshots: ${prefs.getInt("history_count", 0)}\nWaiting for changes..." }
+                    }
+                    val count = prefs.getInt("history_count", 0)
+                    val preview = if (text.isNotBlank()) text.take(650) else "Waiting for readable text..."
+                    status?.post {
+                        status?.text = "Scans: $scans\nSaved text snapshots: $count / 50\n\n$preview"
                     }
                 }
-                .addOnFailureListener { status?.post { status?.text = "OCR error: ${it.message}" } }
-                .addOnCompleteListener { bitmap.recycle(); busy.set(false) }
+                .addOnFailureListener {
+                    status?.post { status?.text = "Scans: $scans\nOCR error: ${it.message}" }
+                }
+                .addOnCompleteListener {
+                    bitmap.recycle()
+                    busy.set(false)
+                }
         } catch (e: Exception) {
             try { image.close() } catch (_: Exception) {}
             status?.post { status?.text = "Capture error: ${e.message}" }
@@ -111,7 +118,8 @@ class CaptureService : Service() {
         val old = try { JSONArray(prefs.getString("history", "[]")) } catch (_: Exception) { JSONArray() }
         val entry = JSONObject().put("time", System.currentTimeMillis()).put("text", text.take(1200))
         val updated = JSONArray()
-        val start = (old.length() - 48).coerceAtLeast(0)
+        // Keep the newest 49 old entries, then append the new one: maximum 50.
+        val start = (old.length() - 49).coerceAtLeast(0)
         for (i in start until old.length()) updated.put(old.getJSONObject(i))
         updated.put(entry)
         prefs.edit()
@@ -150,7 +158,7 @@ class CaptureService : Service() {
         val type = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            type, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+            type, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE, PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.END; x = 12; y = 120 }
 
         box.setOnTouchListener(object : android.view.View.OnTouchListener {
