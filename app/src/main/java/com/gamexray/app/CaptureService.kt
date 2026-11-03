@@ -131,8 +131,9 @@ class CaptureService : Service() {
                 "BAHAR_PANEL" to crop(0.02f, 0.555f, 0.98f, 0.675f),
                 "ANDAR_TOTAL" to crop(0.78f, 0.455f, 0.985f, 0.505f),
                 "BAHAR_TOTAL" to crop(0.78f, 0.565f, 0.985f, 0.615f),
-                "PERSONAL_STAKE" to crop(0.28f, 0.80f, 0.74f, 0.875f),
-                "DEALT" to crop(0.25f, 0.775f, 0.78f, 0.835f),
+                // Non-overlapping lower-screen regions prevent cross-contamination.
+                "DEALT" to crop(0.18f, 0.765f, 0.82f, 0.805f),
+                "PERSONAL_STAKE" to crop(0.18f, 0.825f, 0.82f, 0.875f),
                 "HISTORY_STATS" to crop(0.02f, 0.90f, 0.98f, 0.985f)
             )
             val tasks = zones.map { (_, zone) -> recognizer.process(InputImage.fromBitmap(zone, 0)) }
@@ -149,29 +150,35 @@ class CaptureService : Service() {
                     val stats = results[7].text.replace("\n", " ").take(350)
                     val betting = "ANDAR: $andarPanel | BAHAR: $baharPanel"
                     val full = "BETTING ANALYSIS (raw OCR; verify visually)\nSTAGE: $stageText\nANDAR_PANEL: $andarPanel\nBAHAR_PANEL: $baharPanel\nANDAR_TOTAL: $andarTotalRaw\nBAHAR_TOTAL: $baharTotalRaw\nPERSONAL_STAKE: $personalStake\nDEALT: $dealtText\nHISTORY_STATS: $stats"
-                    val dealt = Regex("(?i)(?:CARDS\\s*)?DEALT\\s*[:#]?\\s*(\\d{1,2})")
-                        .find(dealtText)?.groupValues?.getOrNull(1) ?: "not read"
+                    // Read only the number immediately following the CARDS DEALT label.
+                    val dealtMatch = Regex("(?i)CARDS\\s+DEALT\\s*[:#]?\\s*(\\d{1,2})(?!\\d)").find(dealtText)
+                    val dealtValue = dealtMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val dealt = dealtValue?.takeIf { it in 1..52 }?.toString() ?: "not detected"
                     val stage = when {
                         stageText.contains("PLACE", true) -> "PLACE BET"
                         stageText.contains("LOCK", true) -> "BET LOCKED"
                         else -> "not detected"
                     }
-                    fun panelAmount(raw: String): String {
-                        val tokens = Regex("\\d{1,8}").findAll(raw).map { it.value }.toList()
-                        return tokens.lastOrNull()?.toLongOrNull()
-                            ?.takeIf { it in 1..100000000 }?.toString() ?: "not detected"
+                    fun panelAmount(totalCrop: String, panel: String, label: String): String {
+                        val dedicated = Regex("^\\s*(\\d{1,8})\\s*$").find(totalCrop)?.groupValues?.get(1)
+                        val fromPanel = Regex("(?i)\\b$label\\b.*?1\\s*[:/]\\s*[0-9]+(?:\\.[0-9]+)?.*?\\b(\\d{1,8})\\s*$")
+                            .find(panel)?.groupValues?.get(1)
+                        val value = (dedicated ?: fromPanel)?.toLongOrNull()
+                        return value?.takeIf { it in 1..100000000 }?.toString() ?: "not detected"
                     }
-                    val andarAmount = panelAmount(andarTotalRaw)
-                    val baharAmount = panelAmount(baharTotalRaw)
+                    val andarAmount = panelAmount(andarTotalRaw, andarPanel, "ANDAR")
+                    val baharAmount = panelAmount(baharTotalRaw, baharPanel, "BAHAR")
                     val panelSum = if (andarAmount != "not detected" && baharAmount != "not detected")
                         (andarAmount.toLong() + baharAmount.toLong()).toString() else "not detected"
                     val oddsA = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(andarPanel)?.groupValues?.getOrNull(1)
                     val oddsB = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(baharPanel)?.groupValues?.getOrNull(1)
                     val oddsLine = if (oddsA != null && oddsB != null) "Odds (OCR): Andar 1:$oddsA | Bahar 1:$oddsB" else "Odds: not clearly detected"
                     val pct = Regex("(?i)Andar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%[^\\n]{0,100}?Bahar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%").find(stats)
-                    val percentLine = if (pct != null && pct.groupValues[1].toFloatOrNull() != null && pct.groupValues[2].toFloatOrNull() != null && pct.groupValues[1].toFloat() <= 100f && pct.groupValues[2].toFloat() <= 100f)
-                        "Historical percentages (OCR): Andar ${pct.groupValues[1]}% | Bahar ${pct.groupValues[2]}%"
-                    else "Historical percentages: not clearly detected"
+                    val pctA = pct?.groupValues?.getOrNull(1)?.toFloatOrNull()
+                    val pctB = pct?.groupValues?.getOrNull(2)?.toFloatOrNull()
+                    val percentLine = if (pctA != null && pctB != null && pctA in 0f..100f && pctB in 0f..100f && kotlin.math.abs(pctA + pctB - 100f) <= 2f)
+                        "Historical percentages (OCR): Andar ${pct!!.groupValues[1]}% | Bahar ${pct.groupValues[2]}%"
+                    else "Historical percentages: not clearly detected (raw OCR retained below)"
                     val stakeMatch = Regex("(?i)Total\\s*Stake\\s*[: ]*([0-9]+(?:\\.[0-9]+)?)").find(personalStake)?.groupValues?.getOrNull(1)
                     val personalStakeLine = stakeMatch?.let { "Personal Total Stake: $it" } ?: "Personal Total Stake: not detected"
                     val summary = "Scans: $scans\\nFrames received: $framesReceived\\nGame stage: $stage\\nAndar panel total: $andarAmount\\nBahar panel total: $baharAmount\\nPanel combined total: $panelSum\\n$oddsLine\\n$personalStakeLine\\nCards dealt counter: $dealt\\n$percentLine\\nRound winner: not detected (explicit result text required)\\nAndar raw: $andarPanel [$andarTotalRaw]\\nBahar raw: $baharPanel [$baharTotalRaw]\\nHistory stats (raw): $stats"
