@@ -22,6 +22,7 @@ import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.google.android.gms.tasks.Tasks
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -85,25 +86,50 @@ class CaptureService : Service() {
         try {
             val bitmap = imageToBitmap(image)
             image.close()
-            recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                .addOnSuccessListener { result ->
+            // Coordinates are proportional to the captured screen. These boxes match
+            // the supplied 691x1536 QueenMaker mobile layout; they are OCR zones, not
+            // computer-vision proof that a card/chip has been identified.
+            val w = bitmap.width
+            val h = bitmap.height
+            fun crop(l: Float, t: Float, r: Float, b: Float): android.graphics.Bitmap {
+                val x = (w * l).toInt().coerceIn(0, w - 1)
+                val y = (h * t).toInt().coerceIn(0, h - 1)
+                val right = (w * r).toInt().coerceIn(x + 1, w)
+                val bottom = (h * b).toInt().coerceIn(y + 1, h)
+                return android.graphics.Bitmap.createBitmap(bitmap, x, y, right - x, bottom - y)
+            }
+            val zones = listOf(
+                "CARDS" to crop(0.42f, 0.25f, 0.96f, 0.40f),
+                "ANDAR_BAHAR" to crop(0.02f, 0.44f, 0.98f, 0.68f),
+                "DEALT" to crop(0.28f, 0.78f, 0.76f, 0.84f),
+                "STATS" to crop(0.02f, 0.90f, 0.98f, 0.98f)
+            )
+            val tasks = zones.map { (_, zone) -> recognizer.process(InputImage.fromBitmap(zone, 0)) }
+            Tasks.whenAllSuccess<com.google.mlkit.vision.text.Text>(tasks)
+                .addOnSuccessListener { results ->
                     scans++
-                    val text = result.text.trim()
+                    val sections = zones.indices.joinToString("\n") { i ->
+                        "${zones[i].first}: ${results[i].text.replace("\n", " ").take(280)}"
+                    }
+                    val full = "REGION OCR (raw; verify visually)\n$sections"
+                    val dealt = Regex("(?i)CARDS DEALT\\s*[:#]?\\s*(\\d{1,2})")
+                        .find(sections)?.groupValues?.getOrNull(1) ?: "not read"
+                    val cards = results[0].text.replace("\n", " ").take(180)
+                    val andarBahar = results[1].text.replace("\n", " ").take(220)
+                    val summary = "Scans: $scans\nSaved text snapshots: ${prefs.getInt("history_count", 0)} / 50" +
+                        "\nCards area (raw): $cards\nCards dealt: $dealt\nAndar/Bahar area (raw): $andarBahar"
                     prefs.edit().putInt("scan_count", scans).apply()
-                    if (text.isNotBlank() && text != lastText) {
-                        lastText = text
-                        saveTextSnapshot(text)
+                    if (full != lastText) {
+                        lastText = full
+                        saveTextSnapshot(full)
                     }
-                    val count = prefs.getInt("history_count", 0)
-                    val preview = if (text.isNotBlank()) text.take(650) else "Waiting for readable text..."
-                    status?.post {
-                        status?.text = "Scans: $scans\nSaved text snapshots: $count / 50\n\n$preview"
-                    }
+                    status?.post { status?.text = summary }
                 }
                 .addOnFailureListener {
-                    status?.post { status?.text = "Scans: $scans\nOCR error: ${it.message}" }
+                    status?.post { status?.text = "Scans: $scans\nRegion OCR error: ${it.message}" }
                 }
                 .addOnCompleteListener {
+                    zones.forEach { it.second.recycle() }
                     bitmap.recycle()
                     busy.set(false)
                 }
