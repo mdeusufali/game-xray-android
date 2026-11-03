@@ -74,7 +74,7 @@ class CaptureService : Service() {
         }, null)
         reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
         showFloatingPanel()
-        status?.text = "Starting display capture...\\nScreen: ${w}x${h}"
+        status?.text = "Starting display capture...\nScreen: ${w}x${h}"
         reader?.setOnImageAvailableListener({ source ->
             val image = try { source.acquireLatestImage() } catch (e: Exception) {
                 status?.post { status?.text = "Frame read error: ${e.message}" }
@@ -83,10 +83,10 @@ class CaptureService : Service() {
             if (image != null) {
                 if (busy.compareAndSet(false, true)) readFrame(image) else {
                     image.close()
-                    status?.post { status?.text = "Frames received: $framesReceived\\nOCR busy; waiting for next frame..." }
+                    status?.post { status?.text = "Frames received: $framesReceived\nOCR busy; waiting for next frame..." }
                 }
             } else {
-                status?.post { status?.text = "Waiting for screen frames...\\nIf this remains, Android did not deliver a frame." }
+                status?.post { status?.text = "Waiting for screen frames...\nIf this remains, Android did not deliver a frame." }
             }
         }, Handler(Looper.getMainLooper()))
         display = projection?.createVirtualDisplay(
@@ -96,7 +96,7 @@ class CaptureService : Service() {
         if (display == null) {
             status?.text = "ERROR: VirtualDisplay could not start"
         } else {
-            status?.text = "Capture connected. Waiting for first frame...\\nScreen: ${w}x${h}"
+            status?.text = "Capture connected. Waiting for first frame...\nScreen: ${w}x${h}"
         }
     }
 
@@ -105,7 +105,7 @@ class CaptureService : Service() {
             framesReceived++
             val frameWidth = image.width
             val frameHeight = image.height
-            status?.post { status?.text = "Frames received: $framesReceived\\nFrame: ${frameWidth}x${frameHeight}\\nOCR processing..." }
+            status?.post { status?.text = "Frames received: $framesReceived\nFrame: ${frameWidth}x${frameHeight}\nOCR processing..." }
             prefs.edit().putInt("frames_received", framesReceived)
                 .putString("last_status", "Frames received: $framesReceived | OCR processing")
                 .apply()
@@ -148,7 +148,7 @@ class CaptureService : Service() {
                         lastText = full
                         saveTextSnapshot(full)
                     }
-                    val liveSummary = "Frames received: $framesReceived\\n$summary"
+                    val liveSummary = "Frames received: $framesReceived\n$summary"
                     prefs.edit().putString("last_status", liveSummary).apply()
                     status?.post { status?.text = liveSummary }
                 }
@@ -162,7 +162,7 @@ class CaptureService : Service() {
                 }
         } catch (e: Exception) {
             try { image.close() } catch (_: Exception) {}
-            val errorText = "Frames received: $framesReceived\\nCapture error: ${e.javaClass.simpleName}: ${e.message}"
+            val errorText = "Frames received: $framesReceived\nCapture error: ${e.javaClass.simpleName}: ${e.message}"
             prefs.edit().putString("last_status", errorText).apply()
             status?.post { status?.text = errorText }
             busy.set(false)
