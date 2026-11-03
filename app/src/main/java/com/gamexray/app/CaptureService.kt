@@ -12,6 +12,8 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -36,6 +38,7 @@ class CaptureService : Service() {
     private var windowManager: WindowManager? = null
     private var status: TextView? = null
     private var scans = 0
+    private var framesReceived = 0
     private var lastText = ""
     private val busy = AtomicBoolean(false)
     private val prefs by lazy { getSharedPreferences("game_xray_local", Context.MODE_PRIVATE) }
@@ -58,6 +61,7 @@ class CaptureService : Service() {
 
     private fun beginCapture(code: Int, data: Intent) {
         scans = prefs.getInt("scan_count", 0)
+        framesReceived = prefs.getInt("frames_received", 0)
         lastText = prefs.getString("last_text", "") ?: ""
         val metrics = resources.displayMetrics
         val w = metrics.widthPixels
@@ -68,22 +72,43 @@ class CaptureService : Service() {
         projection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() { stopSelf() }
         }, null)
-        reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+        showFloatingPanel()
+        status?.text = "Starting display capture...\\nScreen: ${w}x${h}"
+        reader?.setOnImageAvailableListener({ source ->
+            val image = try { source.acquireLatestImage() } catch (e: Exception) {
+                status?.post { status?.text = "Frame read error: ${e.message}" }
+                null
+            }
+            if (image != null) {
+                if (busy.compareAndSet(false, true)) readFrame(image) else {
+                    image.close()
+                    status?.post { status?.text = "Frames received: $framesReceived\\nOCR busy; waiting for next frame..." }
+                }
+            } else {
+                status?.post { status?.text = "Waiting for screen frames...\\nIf this remains, Android did not deliver a frame." }
+            }
+        }, Handler(Looper.getMainLooper()))
         display = projection?.createVirtualDisplay(
             "GameXRay", w, h, density, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader?.surface, null, null
+            reader?.surface, null, Handler(Looper.getMainLooper())
         )
-        showFloatingPanel()
-        reader?.setOnImageAvailableListener({ source ->
-            val image = try { source.acquireLatestImage() } catch (_: Exception) { null }
-            if (image != null) {
-                if (busy.compareAndSet(false, true)) readFrame(image) else image.close()
-            }
-        }, null)
+        if (display == null) {
+            status?.text = "ERROR: VirtualDisplay could not start"
+        } else {
+            status?.text = "Capture connected. Waiting for first frame...\\nScreen: ${w}x${h}"
+        }
     }
 
     private fun readFrame(image: Image) {
         try {
+            framesReceived++
+            val frameWidth = image.width
+            val frameHeight = image.height
+            status?.post { status?.text = "Frames received: $framesReceived\\nFrame: ${frameWidth}x${frameHeight}\\nOCR processing..." }
+            prefs.edit().putInt("frames_received", framesReceived)
+                .putString("last_status", "Frames received: $framesReceived | OCR processing")
+                .apply()
             val bitmap = imageToBitmap(image)
             image.close()
             // Coordinates are proportional to the captured screen. These boxes match
@@ -123,7 +148,9 @@ class CaptureService : Service() {
                         lastText = full
                         saveTextSnapshot(full)
                     }
-                    status?.post { status?.text = summary }
+                    val liveSummary = "Frames received: $framesReceived\\n$summary"
+                    prefs.edit().putString("last_status", liveSummary).apply()
+                    status?.post { status?.text = liveSummary }
                 }
                 .addOnFailureListener {
                     status?.post { status?.text = "Scans: $scans\nRegion OCR error: ${it.message}" }
@@ -135,7 +162,9 @@ class CaptureService : Service() {
                 }
         } catch (e: Exception) {
             try { image.close() } catch (_: Exception) {}
-            status?.post { status?.text = "Capture error: ${e.message}" }
+            val errorText = "Frames received: $framesReceived\\nCapture error: ${e.javaClass.simpleName}: ${e.message}"
+            prefs.edit().putString("last_status", errorText).apply()
+            status?.post { status?.text = errorText }
             busy.set(false)
         }
     }
@@ -206,7 +235,8 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
-        prefs.edit().putInt("scan_count", scans).putString("last_text", lastText).apply()
+        prefs.edit().putInt("scan_count", scans).putInt("frames_received", framesReceived)
+            .putString("last_text", lastText).apply()
         try { overlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         display?.release()
         reader?.close()
