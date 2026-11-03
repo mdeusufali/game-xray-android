@@ -22,6 +22,8 @@ import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import org.json.JSONArray
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -34,7 +36,8 @@ class CaptureService : Service() {
     private var status: TextView? = null
     private var scans = 0
     private var lastText = ""
-    private var busy = AtomicBoolean(false)
+    private val busy = AtomicBoolean(false)
+    private val prefs by lazy { getSharedPreferences("game_xray_local", Context.MODE_PRIVATE) }
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -53,6 +56,8 @@ class CaptureService : Service() {
     }
 
     private fun beginCapture(code: Int, data: Intent) {
+        scans = prefs.getInt("scan_count", 0)
+        lastText = prefs.getString("last_text", "") ?: ""
         val metrics = resources.displayMetrics
         val w = metrics.widthPixels
         val h = metrics.heightPixels
@@ -83,13 +88,15 @@ class CaptureService : Service() {
             recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener { result ->
                     scans++
-                    val text = result.text
+                    val text = result.text.trim()
+                    prefs.edit().putInt("scan_count", scans).apply()
                     if (text.isNotBlank() && text != lastText) {
                         lastText = text
-                        status?.post {
-                            status?.text = "Scans: $scans\n\n" + text.take(700)
-                        }
-                    } else status?.post { status?.text = "Scans: $scans\nWaiting for visible text..." }
+                        saveTextSnapshot(text)
+                        status?.post { status?.text = "Scans: $scans\nSaved text snapshots: ${prefs.getInt("history_count", 0)}\n\n" + text.take(650) }
+                    } else {
+                        status?.post { status?.text = "Scans: $scans\nSaved text snapshots: ${prefs.getInt("history_count", 0)}\nWaiting for changes..." }
+                    }
                 }
                 .addOnFailureListener { status?.post { status?.text = "OCR error: ${it.message}" } }
                 .addOnCompleteListener { bitmap.recycle(); busy.set(false) }
@@ -98,6 +105,20 @@ class CaptureService : Service() {
             status?.post { status?.text = "Capture error: ${e.message}" }
             busy.set(false)
         }
+    }
+
+    private fun saveTextSnapshot(text: String) {
+        val old = try { JSONArray(prefs.getString("history", "[]")) } catch (_: Exception) { JSONArray() }
+        val entry = JSONObject().put("time", System.currentTimeMillis()).put("text", text.take(1200))
+        val updated = JSONArray()
+        val start = (old.length() - 48).coerceAtLeast(0)
+        for (i in start until old.length()) updated.put(old.getJSONObject(i))
+        updated.put(entry)
+        prefs.edit()
+            .putString("history", updated.toString())
+            .putInt("history_count", updated.length())
+            .putString("last_text", text)
+            .apply()
     }
 
     private fun imageToBitmap(image: Image): android.graphics.Bitmap {
@@ -151,6 +172,7 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        prefs.edit().putInt("scan_count", scans).putString("last_text", lastText).apply()
         try { overlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         display?.release()
         reader?.close()
