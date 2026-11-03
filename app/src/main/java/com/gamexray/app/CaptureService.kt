@@ -123,31 +123,58 @@ class CaptureService : Service() {
                 val bottom = (h * b).toInt().coerceIn(y + 1, h)
                 return android.graphics.Bitmap.createBitmap(bitmap, x, y, right - x, bottom - y)
             }
-            // Betting-first OCR zones; card rank/suit recognition is intentionally excluded.
+            // Separate OCR zones for live stage, panel totals, personal stake and history.
+            // Card rank/suit recognition and network inspection are intentionally excluded.
             val zones = listOf(
-                "BETTING_PANELS" to crop(0.02f, 0.45f, 0.98f, 0.69f),
-                "DEALT" to crop(0.28f, 0.78f, 0.76f, 0.85f),
+                "STAGE" to crop(0.28f, 0.405f, 0.72f, 0.455f),
+                "ANDAR_PANEL" to crop(0.02f, 0.445f, 0.98f, 0.555f),
+                "BAHAR_PANEL" to crop(0.02f, 0.555f, 0.98f, 0.675f),
+                "ANDAR_TOTAL" to crop(0.78f, 0.455f, 0.985f, 0.505f),
+                "BAHAR_TOTAL" to crop(0.78f, 0.565f, 0.985f, 0.615f),
+                "PERSONAL_STAKE" to crop(0.28f, 0.80f, 0.74f, 0.875f),
+                "DEALT" to crop(0.25f, 0.775f, 0.78f, 0.835f),
                 "HISTORY_STATS" to crop(0.02f, 0.90f, 0.98f, 0.985f)
             )
             val tasks = zones.map { (_, zone) -> recognizer.process(InputImage.fromBitmap(zone, 0)) }
             Tasks.whenAllSuccess<com.google.mlkit.vision.text.Text>(tasks)
                 .addOnSuccessListener { results ->
                     scans++
-                    val betting = results[0].text.replace("\n", " ").take(500)
-                    val dealtText = results[1].text.replace("\n", " ").take(180)
-                    val stats = results[2].text.replace("\n", " ").take(350)
-                    val sections = "BETTING_PANELS: $betting\nDEALT: $dealtText\nHISTORY_STATS: $stats"
-                    val full = "BETTING ANALYSIS (raw OCR; verify visually)\n$sections"
+                    val stageText = results[0].text.replace("\n", " ").trim().take(100)
+                    val andarPanel = results[1].text.replace("\n", " ").trim().take(250)
+                    val baharPanel = results[2].text.replace("\n", " ").trim().take(250)
+                    val andarTotalRaw = results[3].text.replace("\n", " ").trim().take(100)
+                    val baharTotalRaw = results[4].text.replace("\n", " ").trim().take(100)
+                    val personalStake = results[5].text.replace("\n", " ").trim().take(160)
+                    val dealtText = results[6].text.replace("\n", " ").take(180)
+                    val stats = results[7].text.replace("\n", " ").take(350)
+                    val betting = "ANDAR: $andarPanel | BAHAR: $baharPanel"
+                    val full = "BETTING ANALYSIS (raw OCR; verify visually)\nSTAGE: $stageText\nANDAR_PANEL: $andarPanel\nBAHAR_PANEL: $baharPanel\nANDAR_TOTAL: $andarTotalRaw\nBAHAR_TOTAL: $baharTotalRaw\nPERSONAL_STAKE: $personalStake\nDEALT: $dealtText\nHISTORY_STATS: $stats"
                     val dealt = Regex("(?i)(?:CARDS\\s*)?DEALT\\s*[:#]?\\s*(\\d{1,2})")
                         .find(dealtText)?.groupValues?.getOrNull(1) ?: "not read"
-                    // Parse explicit labelled values only; never infer a winner from UI colours.
-                    val odds = Regex("(?i)Andar\\s*1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?).*?Bahar\\s*1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(betting)
-                    val oddsLine = if (odds != null) "Odds (OCR): Andar 1:${odds.groupValues[1]} | Bahar 1:${odds.groupValues[2]}" else "Odds: not clearly detected"
+                    val stage = when {
+                        stageText.contains("PLACE", true) -> "PLACE BET"
+                        stageText.contains("LOCK", true) -> "BET LOCKED"
+                        else -> "not detected"
+                    }
+                    fun panelAmount(raw: String): String {
+                        val tokens = Regex("\\d{1,8}").findAll(raw).map { it.value }.toList()
+                        return tokens.lastOrNull()?.toLongOrNull()
+                            ?.takeIf { it in 1..100000000 }?.toString() ?: "not detected"
+                    }
+                    val andarAmount = panelAmount(andarTotalRaw)
+                    val baharAmount = panelAmount(baharTotalRaw)
+                    val panelSum = if (andarAmount != "not detected" && baharAmount != "not detected")
+                        (andarAmount.toLong() + baharAmount.toLong()).toString() else "not detected"
+                    val oddsA = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(andarPanel)?.groupValues?.getOrNull(1)
+                    val oddsB = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(baharPanel)?.groupValues?.getOrNull(1)
+                    val oddsLine = if (oddsA != null && oddsB != null) "Odds (OCR): Andar 1:$oddsA | Bahar 1:$oddsB" else "Odds: not clearly detected"
                     val pct = Regex("(?i)Andar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%[^\\n]{0,100}?Bahar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%").find(stats)
                     val percentLine = if (pct != null && pct.groupValues[1].toFloatOrNull() != null && pct.groupValues[2].toFloatOrNull() != null && pct.groupValues[1].toFloat() <= 100f && pct.groupValues[2].toFloat() <= 100f)
                         "Historical percentages (OCR): Andar ${pct.groupValues[1]}% | Bahar ${pct.groupValues[2]}%"
                     else "Historical percentages: not clearly detected"
-                    val summary = "Scans: $scans\\nFrames received: $framesReceived\\nCards dealt counter: $dealt\\n$oddsLine\\n$percentLine\\nCurrent bet amounts: not reliably detected\\nRound winner: not detected (explicit result text required)\\nBetting area (raw): $betting\\nHistory stats (raw): $stats"
+                    val stakeMatch = Regex("(?i)Total\\s*Stake\\s*[: ]*([0-9]+(?:\\.[0-9]+)?)").find(personalStake)?.groupValues?.getOrNull(1)
+                    val personalStakeLine = stakeMatch?.let { "Personal Total Stake: $it" } ?: "Personal Total Stake: not detected"
+                    val summary = "Scans: $scans\\nFrames received: $framesReceived\\nGame stage: $stage\\nAndar panel total: $andarAmount\\nBahar panel total: $baharAmount\\nPanel combined total: $panelSum\\n$oddsLine\\n$personalStakeLine\\nCards dealt counter: $dealt\\n$percentLine\\nRound winner: not detected (explicit result text required)\\nAndar raw: $andarPanel [$andarTotalRaw]\\nBahar raw: $baharPanel [$baharTotalRaw]\\nHistory stats (raw): $stats"
                     prefs.edit().putInt("scan_count", scans).apply()
                     if (full != lastText) {
                         lastText = full
