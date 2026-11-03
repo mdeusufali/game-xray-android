@@ -123,26 +123,27 @@ class CaptureService : Service() {
                 val bottom = (h * b).toInt().coerceIn(y + 1, h)
                 return android.graphics.Bitmap.createBitmap(bitmap, x, y, right - x, bottom - y)
             }
+            // Betting-first OCR zones; card rank/suit recognition is intentionally excluded.
             val zones = listOf(
-                "CARDS" to crop(0.42f, 0.25f, 0.96f, 0.40f),
-                "ANDAR_BAHAR" to crop(0.02f, 0.44f, 0.98f, 0.68f),
-                "DEALT" to crop(0.28f, 0.78f, 0.76f, 0.84f),
-                "STATS" to crop(0.02f, 0.90f, 0.98f, 0.98f)
+                "BETTING_PANELS" to crop(0.02f, 0.45f, 0.98f, 0.69f),
+                "DEALT" to crop(0.28f, 0.78f, 0.76f, 0.85f),
+                "HISTORY_STATS" to crop(0.02f, 0.90f, 0.98f, 0.985f)
             )
             val tasks = zones.map { (_, zone) -> recognizer.process(InputImage.fromBitmap(zone, 0)) }
             Tasks.whenAllSuccess<com.google.mlkit.vision.text.Text>(tasks)
                 .addOnSuccessListener { results ->
                     scans++
-                    val sections = zones.indices.joinToString("\n") { i ->
-                        "${zones[i].first}: ${results[i].text.replace("\n", " ").take(280)}"
-                    }
-                    val full = "REGION OCR (raw; verify visually)\n$sections"
-                    val dealt = Regex("(?i)CARDS DEALT\\s*[:#]?\\s*(\\d{1,2})")
-                        .find(sections)?.groupValues?.getOrNull(1) ?: "not read"
-                    val cards = results[0].text.replace("\n", " ").take(180)
-                    val andarBahar = results[1].text.replace("\n", " ").take(220)
-                    val summary = "Scans: $scans\nSaved text snapshots: ${prefs.getInt("history_count", 0)} / 50" +
-                        "\nCards area (raw): $cards\nCards dealt: $dealt\nAndar/Bahar area (raw): $andarBahar"
+                    val betting = results[0].text.replace("\n", " ").take(500)
+                    val dealtText = results[1].text.replace("\n", " ").take(180)
+                    val stats = results[2].text.replace("\n", " ").take(350)
+                    val sections = "BETTING_PANELS: $betting\nDEALT: $dealtText\nHISTORY_STATS: $stats"
+                    val full = "BETTING ANALYSIS (raw OCR; verify visually)\n$sections"
+                    val dealt = Regex("(?i)(?:CARDS\\s*)?DEALT\\s*[:#]?\\s*(\\d{1,2})")
+                        .find(dealtText)?.groupValues?.getOrNull(1) ?: "not read"
+                    val pct = Regex("(?i)Andar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%?[^\\n]{0,80}?Bahar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%?")
+                        .find(stats)
+                    val percentLine = if (pct != null) "Historical stats: Andar ${pct.groupValues[1]}% | Bahar ${pct.groupValues[2]}%" else "Historical stats: uncertain; raw text below"
+                    val summary = "Scans: $scans\nFrames received: $framesReceived\nCards dealt: $dealt\n$percentLine\nBetting area (raw): $betting\nHistory stats (raw): $stats"
                     prefs.edit().putInt("scan_count", scans).apply()
                     if (full != lastText) {
                         lastText = full
