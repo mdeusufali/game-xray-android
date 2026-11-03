@@ -140,10 +140,14 @@ class CaptureService : Service() {
                     val full = "BETTING ANALYSIS (raw OCR; verify visually)\n$sections"
                     val dealt = Regex("(?i)(?:CARDS\\s*)?DEALT\\s*[:#]?\\s*(\\d{1,2})")
                         .find(dealtText)?.groupValues?.getOrNull(1) ?: "not read"
-                    val pct = Regex("(?i)Andar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%?[^\\n]{0,80}?Bahar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%?")
-                        .find(stats)
-                    val percentLine = if (pct != null) "Historical stats: Andar ${pct.groupValues[1]}% | Bahar ${pct.groupValues[2]}%" else "Historical stats: uncertain; raw text below"
-                    val summary = "Scans: $scans\nFrames received: $framesReceived\nCards dealt: $dealt\n$percentLine\nBetting area (raw): $betting\nHistory stats (raw): $stats"
+                    // Parse explicit labelled values only; never infer a winner from UI colours.
+                    val odds = Regex("(?i)Andar\\s*1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?).*?Bahar\\s*1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(betting)
+                    val oddsLine = if (odds != null) "Odds (OCR): Andar 1:${odds.groupValues[1]} | Bahar 1:${odds.groupValues[2]}" else "Odds: not clearly detected"
+                    val pct = Regex("(?i)Andar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%[^\\n]{0,100}?Bahar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%").find(stats)
+                    val percentLine = if (pct != null && pct.groupValues[1].toFloatOrNull() != null && pct.groupValues[2].toFloatOrNull() != null && pct.groupValues[1].toFloat() <= 100f && pct.groupValues[2].toFloat() <= 100f)
+                        "Historical percentages (OCR): Andar ${pct.groupValues[1]}% | Bahar ${pct.groupValues[2]}%"
+                    else "Historical percentages: not clearly detected"
+                    val summary = "Scans: $scans\\nFrames received: $framesReceived\\nCards dealt counter: $dealt\\n$oddsLine\\n$percentLine\\nCurrent bet amounts: not reliably detected\\nRound winner: not detected (explicit result text required)\\nBetting area (raw): $betting\\nHistory stats (raw): $stats"
                     prefs.edit().putInt("scan_count", scans).apply()
                     if (full != lastText) {
                         lastText = full
