@@ -112,6 +112,9 @@ class CaptureService : Service() {
     private fun analyze(result: Text, lines: List<String>) {
         val raw = lines.joinToString(" | ").take(4000)
         val normalized = raw.uppercase().replace(Regex("\\s+"), " ")
+        // OCR sometimes reads BAHAR as BOHAR. Normalize this common visual confusion
+        // for parsing while preserving the original raw OCR text in diagnostics.
+        val canonicalLines = lines.map { it.replace(Regex("(?i)\\bBOHAR\\b"), "BAHAR") }
         // BET LOCKED takes precedence when both labels appear in one OCR frame.
         val stage = when {
             Regex("\\bBET\\s+LOCKED\\b").containsMatchIn(normalized) -> "BET LOCKED"
@@ -134,22 +137,33 @@ class CaptureService : Service() {
             return "not detected"
         }
         fun oddsFor(side: String): String {
-            val sideIndex = lines.indexOfFirst { Regex("\\b" + side + "\\b", RegexOption.IGNORE_CASE).containsMatchIn(it) }
-            if (sideIndex < 0) return "not detected"
             val pattern = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)")
-            val candidates = listOf(sideIndex, sideIndex + 1, sideIndex - 1).filter { it in lines.indices }
-            for (index in candidates) {
-                val line = lines[index]
-                val upper = line.uppercase()
-                if (upper.contains("RANGE") || upper.contains("HISTORY") || upper.contains("BIGGEST") ||
-                    (upper.contains("ANDAR") && upper.contains("BAHAR"))) continue
-                val value = pattern.find(line)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
-                if (value != null && value in 1.01..1000.0) return formatNum(value)
+            // Prefer a clean side-label line and inspect only its immediate OCR
+            // neighborhood. Do not search the distant betting-range odds list.
+            val candidates = canonicalLines.indices
+                .filter { i ->
+                    val u = canonicalLines[i].uppercase().trim()
+                    val cleanSide = Regex("^" + side + "[\\\\s.:!_-]*$").matches(u)
+                    val sameLineSide = Regex("\\\\b" + side + "\\\\b").containsMatchIn(u) &&
+                        !u.contains("BIGGEST") && !u.contains("HISTORY") && !u.contains("LAST")
+                    cleanSide || sameLineSide
+                }
+            for (sideIndex in candidates) {
+                val nearby = listOf(sideIndex, sideIndex + 1, sideIndex - 1)
+                    .filter { it in canonicalLines.indices }
+                for (index in nearby) {
+                    val upper = canonicalLines[index].uppercase()
+                    if (upper.contains("RANGE") || upper.contains("HISTORY") ||
+                        upper.contains("BIGGEST") || upper.contains("LAST") ||
+                        (upper.contains("ANDAR") && upper.contains("BAHAR"))) continue
+                    val value = pattern.find(canonicalLines[index])?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                    if (value != null && value in 1.01..1000.0) return formatNum(value)
+                }
             }
             return "not detected"
         }
-        val andarPanel = lines.filter { it.contains("ANDAR", true) }.joinToString(" / ").take(400)
-        val baharPanel = lines.filter { it.contains("BAHAR", true) }.joinToString(" / ").take(400)
+        val andarPanel = canonicalLines.filter { it.contains("ANDAR", true) }.joinToString(" / ").take(400)
+        val baharPanel = canonicalLines.filter { it.contains("BAHAR", true) }.joinToString(" / ").take(400)
         val andarTotal = panelTotal("ANDAR")
         val baharTotal = panelTotal("BAHAR")
         val oddsA = oddsFor("ANDAR")
@@ -171,7 +185,7 @@ class CaptureService : Service() {
         val pct = if (pA != null && pB != null && pA in 0.0..100.0 && pB in 0.0..100.0 && abs(pA+pB-100.0)<=2.0) "Andar ${formatNum(pA)}% / Bahar ${formatNum(pB)}%" else "not reliably detected"
         // Require result wording on the same OCR line as the side; ignore promotional winner labels.
         fun explicitWinnerOnLine(line: String): String {
-            val u = line.uppercase()
+            val u = line.replace(Regex("(?i)\\bBOHAR\\b"), "BAHAR").uppercase()
             if (u.contains("BIGGEST WINNER") || u.contains("TOP WINNER")) return "NOT DETECTED"
             if (!Regex("\\b(WINS|WON|WINNER|RESULT)\\b").containsMatchIn(u)) return "NOT DETECTED"
             val hasA = Regex("\\bANDAR\\b").containsMatchIn(u)
@@ -218,10 +232,12 @@ class CaptureService : Service() {
         if (winner != "NOT DETECTED" && roundPhase == "LOCKED" && roundId > 0L) {
             if (prefs.getLong("last_saved_round_id", 0L) == roundId) return
             val rounds = readArray("rounds")
-            val personalStake = prefs.getString("my_stake", "") ?: ""
-            val side = prefs.getString("my_side", "NONE") ?: "NONE"
-            // P/L uses the user's explicitly saved personal odds, never a nearby public/range odds label.
-            val personalOdds = prefs.getString("my_odds", "") ?: ""
+            // Use the settings frozen when this round began. Later edits must not
+            // rewrite the stake, side, or odds belonging to an earlier round.
+            val personalStake = prefs.getString("round_my_stake", prefs.getString("my_stake", "") ?: "") ?: ""
+            val side = prefs.getString("round_my_side", prefs.getString("my_side", "NONE") ?: "NONE") ?: "NONE"
+            // P/L uses the user's explicitly entered odds, never public panel/range odds.
+            val personalOdds = prefs.getString("round_my_odds", prefs.getString("my_odds", "") ?: "") ?: ""
             val stake = personalStake.toDoubleOrNull()
             val odds = personalOdds.toDoubleOrNull()
             val pnl = if (stake != null && stake > 0 && side in listOf("ANDAR", "BAHAR") && odds != null && odds >= 1.0) {
