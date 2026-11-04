@@ -11,8 +11,8 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
-import android.os.IBinder
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
@@ -23,12 +23,13 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import com.google.android.gms.tasks.Tasks
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 class CaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -38,266 +39,183 @@ class CaptureService : Service() {
     private var windowManager: WindowManager? = null
     private var status: TextView? = null
     private var scans = 0
-    private var framesReceived = 0
+    private var frames = 0
     private var lastText = ""
+    private var roundPhase = "IDLE"
+    private var roundId = 0L
     private val busy = AtomicBoolean(false)
     private val prefs by lazy { getSharedPreferences("game_xray_local", Context.MODE_PRIVATE) }
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val channel = NotificationChannel("gx", "Game X-Ray capture", NotificationManager.IMPORTANCE_LOW)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        startForeground(7, Notification.Builder(this, "gx")
-            .setContentTitle("Game X-Ray is capturing")
-            .setContentText("Screen capture is active until you stop it")
-            .setSmallIcon(android.R.drawable.ic_menu_view).build())
-
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("gx", "Game X-Ray capture", NotificationManager.IMPORTANCE_LOW))
+        val notification = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "gx") else @Suppress("DEPRECATION") Notification.Builder(this)
+        startForeground(7, notification.setContentTitle("Game X-Ray is capturing").setContentText("Local screen OCR active").setSmallIcon(android.R.drawable.ic_menu_view).build())
         val code = intent?.getIntExtra("resultCode", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
-        @Suppress("DEPRECATION")
-        val data = intent?.getParcelableExtra<Intent>("resultData")
+        @Suppress("DEPRECATION") val data = intent?.getParcelableExtra<Intent>("resultData")
         if (code == Activity.RESULT_OK && data != null) beginCapture(code, data)
         return START_NOT_STICKY
     }
 
     private fun beginCapture(code: Int, data: Intent) {
-        scans = prefs.getInt("scan_count", 0)
-        framesReceived = prefs.getInt("frames_received", 0)
-        lastText = prefs.getString("last_text", "") ?: ""
-        val metrics = resources.displayMetrics
-        val w = metrics.widthPixels
-        val h = metrics.heightPixels
-        val density = metrics.densityDpi
-        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = manager.getMediaProjection(code, data)
-        projection?.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() { stopSelf() }
-        }, null)
-        reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+        scans = prefs.getInt("scan_count", 0); frames = prefs.getInt("frames_received", 0)
+        val m = resources.displayMetrics
+        val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        projection = mgr.getMediaProjection(code, data)
+        projection?.registerCallback(object : MediaProjection.Callback() { override fun onStop() { stopSelf() } }, Handler(Looper.getMainLooper()))
+        reader = ImageReader.newInstance(m.widthPixels, m.heightPixels, PixelFormat.RGBA_8888, 3)
         showFloatingPanel()
-        status?.text = "Starting display capture...\nScreen: ${w}x${h}"
-        reader?.setOnImageAvailableListener({ source ->
-            val image = try { source.acquireLatestImage() } catch (e: Exception) {
-                status?.post { status?.text = "Frame read error: ${e.message}" }
-                null
-            }
-            if (image != null) {
-                if (busy.compareAndSet(false, true)) readFrame(image) else {
-                    image.close()
-                    status?.post { status?.text = "Frames received: $framesReceived\nOCR busy; waiting for next frame..." }
-                }
-            } else {
-                status?.post { status?.text = "Waiting for screen frames...\nIf this remains, Android did not deliver a frame." }
-            }
+        reader?.setOnImageAvailableListener({ src ->
+            val img = try { src.acquireLatestImage() } catch (_: Exception) { null }
+            if (img != null) { if (busy.compareAndSet(false, true)) process(img) else { img.close() } }
         }, Handler(Looper.getMainLooper()))
-        display = projection?.createVirtualDisplay(
-            "GameXRay", w, h, density, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader?.surface, null, Handler(Looper.getMainLooper())
-        )
-        if (display == null) {
-            status?.text = "ERROR: VirtualDisplay could not start"
-        } else {
-            status?.text = "Capture connected. Waiting for first frame...\nScreen: ${w}x${h}"
-        }
+        display = projection?.createVirtualDisplay("GameXRay", m.widthPixels, m.heightPixels, m.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader?.surface, null, Handler(Looper.getMainLooper()))
+        status?.text = if (display == null) "ERROR: capture display did not start" else "Capture ready. Waiting for game screen…"
     }
 
-    private fun readFrame(image: Image) {
+    private fun process(image: Image) {
+        var bitmap: android.graphics.Bitmap? = null
         try {
-            framesReceived++
-            val frameWidth = image.width
-            val frameHeight = image.height
-            status?.post { status?.text = "Frames received: $framesReceived\nFrame: ${frameWidth}x${frameHeight}\nOCR processing..." }
-            prefs.edit().putInt("frames_received", framesReceived)
-                .putString("last_status", "Frames received: $framesReceived | OCR processing")
-                .apply()
-            val bitmap = imageToBitmap(image)
-            image.close()
-            // Coordinates are proportional to the captured screen. These boxes match
-            // the supplied 691x1536 QueenMaker mobile layout; they are OCR zones, not
-            // computer-vision proof that a card/chip has been identified.
-            val w = bitmap.width
-            val h = bitmap.height
-            fun crop(l: Float, t: Float, r: Float, b: Float): android.graphics.Bitmap {
-                val x = (w * l).toInt().coerceIn(0, w - 1)
-                val y = (h * t).toInt().coerceIn(0, h - 1)
-                val right = (w * r).toInt().coerceIn(x + 1, w)
-                val bottom = (h * b).toInt().coerceIn(y + 1, h)
-                return android.graphics.Bitmap.createBitmap(bitmap, x, y, right - x, bottom - y)
+            frames++
+            bitmap = imageToBitmap(image); image.close()
+            val input = InputImage.fromBitmap(bitmap, 0)
+            recognizer.process(input).addOnSuccessListener { result ->
+                scans++
+                val lines = mutableListOf<String>()
+                for (block in result.textBlocks) for (line in block.lines) {
+                    val b = line.boundingBox
+                    val y = if (b != null && bitmap!!.height > 0) (b.centerY().toFloat() / bitmap!!.height) else -1f
+                    lines.add(line.text.trim())
+                    // Keep normalized line geometry for diagnostics and future layout calibration.
+                    if (y >= 0f) Unit
+                }
+                analyze(result, lines)
+            }.addOnFailureListener { err ->
+                saveStatus("OCR error: ${err.javaClass.simpleName}: ${err.message}")
+            }.addOnCompleteListener {
+                bitmap?.recycle()
+                busy.set(false)
             }
-            // Separate OCR zones for live stage, panel totals, personal stake and history.
-            // Card rank/suit recognition and network inspection are intentionally excluded.
-            val zones = listOf(
-                "STAGE" to crop(0.28f, 0.405f, 0.72f, 0.455f),
-                "ANDAR_PANEL" to crop(0.02f, 0.445f, 0.98f, 0.555f),
-                "BAHAR_PANEL" to crop(0.02f, 0.555f, 0.98f, 0.675f),
-                "ANDAR_TOTAL" to crop(0.78f, 0.455f, 0.985f, 0.505f),
-                "BAHAR_TOTAL" to crop(0.78f, 0.565f, 0.985f, 0.615f),
-                // Non-overlapping lower-screen regions prevent cross-contamination.
-                "DEALT" to crop(0.18f, 0.765f, 0.82f, 0.805f),
-                "PERSONAL_STAKE" to crop(0.18f, 0.825f, 0.82f, 0.875f),
-                "HISTORY_STATS" to crop(0.02f, 0.90f, 0.98f, 0.985f)
-            )
-            val tasks = zones.map { (_, zone) -> recognizer.process(InputImage.fromBitmap(zone, 0)) }
-            Tasks.whenAllSuccess<com.google.mlkit.vision.text.Text>(tasks)
-                .addOnSuccessListener { results ->
-                    scans++
-                    val stageText = results[0].text.replace("\n", " ").trim().take(100)
-                    val andarPanel = results[1].text.replace("\n", " ").trim().take(250)
-                    val baharPanel = results[2].text.replace("\n", " ").trim().take(250)
-                    val andarTotalRaw = results[3].text.replace("\n", " ").trim().take(100)
-                    val baharTotalRaw = results[4].text.replace("\n", " ").trim().take(100)
-                    val dealtText = results[5].text.replace("\n", " ").trim().take(180)
-                    val personalStake = results[6].text.replace("\n", " ").take(160)
-                    val stats = results[7].text.replace("\n", " ").take(350)
-                    val betting = "ANDAR: $andarPanel | BAHAR: $baharPanel"
-                    val full = "BETTING ANALYSIS (raw OCR; verify visually)\nSTAGE: $stageText\nANDAR_PANEL: $andarPanel\nBAHAR_PANEL: $baharPanel\nANDAR_TOTAL: $andarTotalRaw\nBAHAR_TOTAL: $baharTotalRaw\nPERSONAL_STAKE: $personalStake\nDEALT: $dealtText\nHISTORY_STATS: $stats"
-                    // Read only the number immediately following the CARDS DEALT label.
-                    val dealtMatch = Regex("(?i)CARDS\\s+DEALT\\s*[:#]?\\s*(\\d{1,2})(?!\\d)").find(dealtText)
-                    val dealtValue = dealtMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
-                    val dealt = dealtValue?.takeIf { it in 1..52 }?.toString() ?: "not detected"
-                    val stage = when {
-                        stageText.contains("PLACE", true) -> "PLACE BET"
-                        stageText.contains("LOCK", true) -> "BET LOCKED"
-                        else -> "not detected"
-                    }
-                    fun panelAmount(totalCrop: String, panel: String, label: String): String {
-                        val dedicated = Regex("^\\s*(\\d{1,8})\\s*$").find(totalCrop)?.groupValues?.get(1)
-                        val fromPanel = Regex("(?i)\\b$label\\b.*?1\\s*[:/]\\s*[0-9]+(?:\\.[0-9]+)?.*?\\b(\\d{1,8})\\s*$")
-                            .find(panel)?.groupValues?.get(1)
-                        val value = (dedicated ?: fromPanel)?.toLongOrNull()
-                        return value?.takeIf { it in 1..100000000 }?.toString() ?: "not detected"
-                    }
-                    val andarAmount = panelAmount(andarTotalRaw, andarPanel, "ANDAR")
-                    val baharAmount = panelAmount(baharTotalRaw, baharPanel, "BAHAR")
-                    val panelSum = if (andarAmount != "not detected" && baharAmount != "not detected")
-                        (andarAmount.toLong() + baharAmount.toLong()).toString() else "not detected"
-                    val oddsA = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(andarPanel)?.groupValues?.getOrNull(1)
-                    val oddsB = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(baharPanel)?.groupValues?.getOrNull(1)
-                    val oddsLine = if (oddsA != null && oddsB != null) "Odds (OCR): Andar 1:$oddsA | Bahar 1:$oddsB" else "Odds: not clearly detected"
-                    val pct = Regex("(?i)Andar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%[^\\n]{0,100}?Bahar\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%").find(stats)
-                    val pctA = pct?.groupValues?.getOrNull(1)?.toFloatOrNull()
-                    val pctB = pct?.groupValues?.getOrNull(2)?.toFloatOrNull()
-                    val percentLine = if (pctA != null && pctB != null && pctA in 0f..100f && pctB in 0f..100f && kotlin.math.abs(pctA + pctB - 100f) <= 2f)
-                        "Historical percentages (OCR): Andar ${pct!!.groupValues[1]}% | Bahar ${pct.groupValues[2]}%"
-                    else "Historical percentages: not clearly detected (raw OCR retained below)"
-                    val stakeMatch = Regex("(?i)Total\\s*Stake\\s*[: ]*([0-9]+(?:\\.[0-9]+)?)").find(personalStake)?.groupValues?.getOrNull(1)
-                    val personalStakeLine = stakeMatch?.let { "Personal Total Stake: $it" } ?: "Personal Total Stake: not detected"
-                    val winner = when {
-                        Regex("(?i)ANDAR.{0,20}(WIN|WON)|(?:WIN|WON).{0,20}ANDAR").containsMatchIn(full) -> "ANDAR"
-                        Regex("(?i)BAHAR.{0,20}(WIN|WON)|(?:WIN|WON).{0,20}BAHAR").containsMatchIn(full) -> "BAHAR"
-                        else -> "not detected"
-                    }
-                    if (winner != "not detected") {
-                        val rounds = try { JSONArray(prefs.getString("rounds", "[]")) } catch (_: Exception) { JSONArray() }
-                        val last = if (rounds.length() > 0) rounds.optJSONObject(rounds.length()-1)?.optString("winner") else null
-                        if (last != winner) {
-                            val updated = JSONArray()
-                            val startRound = (rounds.length() - 499).coerceAtLeast(0)
-                            for (i in startRound until rounds.length()) updated.put(rounds.getJSONObject(i))
-                            updated.put(JSONObject().put("time", System.currentTimeMillis()).put("winner", winner).put("source", "explicit OCR text"))
-                            prefs.edit().putString("rounds", updated.toString()).putInt("round_count", updated.length()).apply()
-                        }
-                    }
-                    val summary = "Scans: $scans\\nFrames received: $framesReceived\\nGame stage: $stage\\nAndar panel total: $andarAmount\\nBahar panel total: $baharAmount\\nPanel combined total: $panelSum\\n$oddsLine\\n$personalStakeLine\\nCards dealt counter: $dealt\\n$percentLine\\nRound winner: $winner (only explicit OCR result text)\\nAndar raw: $andarPanel [$andarTotalRaw]\\nBahar raw: $baharPanel [$baharTotalRaw]\\nHistory stats (raw): $stats\nProfit/Loss: not calculated (personal bet side and confirmed stake are required)"
-                    prefs.edit().putInt("scan_count", scans).apply()
-                    if (full != lastText) {
-                        lastText = full
-                        saveTextSnapshot(full)
-                    }
-                    val liveSummary = "Frames received: $framesReceived\n$summary"
-                    prefs.edit().putString("last_status", liveSummary).apply()
-                    status?.post { status?.text = liveSummary }
-                }
-                .addOnFailureListener {
-                    status?.post { status?.text = "Scans: $scans\nRegion OCR error: ${it.message}" }
-                }
-                .addOnCompleteListener {
-                    zones.forEach { it.second.recycle() }
-                    bitmap.recycle()
-                    busy.set(false)
-                }
         } catch (e: Exception) {
             try { image.close() } catch (_: Exception) {}
-            val errorText = "Frames received: $framesReceived\nCapture error: ${e.javaClass.simpleName}: ${e.message}"
-            prefs.edit().putString("last_status", errorText).apply()
-            status?.post { status?.text = errorText }
+            bitmap?.recycle()
+            saveStatus("Capture error: ${e.javaClass.simpleName}: ${e.message}")
             busy.set(false)
         }
     }
 
-    private fun saveTextSnapshot(text: String) {
-        val old = try { JSONArray(prefs.getString("history", "[]")) } catch (_: Exception) { JSONArray() }
-        val entry = JSONObject().put("time", System.currentTimeMillis()).put("text", text.take(1200))
-        val updated = JSONArray()
-        // Keep the newest 999 old entries, then append the new one: maximum 1000.
-        val start = (old.length() - 999).coerceAtLeast(0)
-        for (i in start until old.length()) updated.put(old.getJSONObject(i))
-        updated.put(entry)
-        prefs.edit()
-            .putString("history", updated.toString())
-            .putInt("history_count", updated.length())
-            .putString("last_text", text)
-            .apply()
+    private fun analyze(result: Text, lines: List<String>) {
+        val raw = lines.joinToString(" | ").take(4000)
+        val normalized = raw.uppercase().replace(Regex("\\s+"), " ")
+        val stage = when {
+            Regex("\\bPLACE\\s+BET\\b").containsMatchIn(normalized) -> "PLACE BET"
+            Regex("\\bBET\\s+LOCKED\\b|\\bLOCKED\\b").containsMatchIn(normalized) -> "BET LOCKED"
+            else -> "NOT DETECTED"
+        }
+        fun moneyNear(label: String): String {
+            val line = lines.firstOrNull { it.contains(label, true) } ?: return "not detected"
+            val match = Regex("(?i)" + Regex.escape(label) + "[^0-9]{0,24}([0-9][0-9,]*(?:\\.[0-9]{1,2})?)").find(line)
+                ?: Regex("([0-9][0-9,]*(?:\\.[0-9]{1,2})?)").find(line)
+            val n = match?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
+            return n?.takeIf { it in 0.01..100000000.0 }?.let { formatNum(it) } ?: "not detected"
+        }
+        fun oddsFor(label: String): String {
+            val line = lines.firstOrNull { it.contains(label, true) } ?: raw
+            val m = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(line) ?: return "not detected"
+            val v = m.groupValues[1].toDoubleOrNull()
+            return v?.takeIf { it in 1.0..1000.0 }?.let { formatNum(it) } ?: "not detected"
+        }
+        val andarPanel = lines.filter { it.contains("ANDAR", true) }.joinToString(" / ").take(400)
+        val baharPanel = lines.filter { it.contains("BAHAR", true) }.joinToString(" / ").take(400)
+        val andarTotal = moneyNear("ANDAR")
+        val baharTotal = moneyNear("BAHAR")
+        val oddsA = oddsFor("ANDAR")
+        val oddsB = oddsFor("BAHAR")
+        val dealtLine = lines.firstOrNull { it.contains("CARDS", true) && it.contains("DEALT", true) } ?: ""
+        val dealt = Regex("(?i)CARDS\\s+DEALT\\s*[:#-]?\\s*(\\d{1,2})").find(dealtLine)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..52 }?.toString() ?: "not detected"
+        val stakeLine = lines.firstOrNull { it.contains("TOTAL STAKE", true) } ?: ""
+        val publicOrPersonalStake = Regex("(?i)TOTAL\\s+STAKE\\s*[:#-]?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)").find(stakeLine)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull()?.takeIf { it in 0.01..100000000.0 }?.let { formatNum(it) } ?: "not detected"
+        val histLine = lines.filter { it.contains("%") || it.contains("HISTORY", true) || it.contains("LAST", true) }.joinToString(" | ").take(600)
+        val percentages = Regex("(?i)ANDAR\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%.*?BAHAR\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%").find(histLine)
+        val pA = percentages?.groupValues?.get(1)?.toDoubleOrNull()
+        val pB = percentages?.groupValues?.get(2)?.toDoubleOrNull()
+        val pct = if (pA != null && pB != null && pA in 0.0..100.0 && pB in 0.0..100.0 && abs(pA+pB-100.0)<=2.0) "Andar ${formatNum(pA)}% / Bahar ${formatNum(pB)}%" else "not reliably detected"
+        val winner = when {
+            Regex("(?i)\\bANDAR\\b.{0,30}\\b(WIN|WON|WINNER)\\b|\\b(WIN|WON|WINNER)\\b.{0,30}\\bANDAR\\b").containsMatchIn(normalized) -> "ANDAR"
+            Regex("(?i)\\bBAHAR\\b.{0,30}\\b(WIN|WON|WINNER)\\b|\\b(WIN|WON|WINNER)\\b.{0,30}\\bBAHAR\\b").containsMatchIn(normalized) -> "BAHAR"
+            else -> "NOT DETECTED"
+        }
+        updateRoundState(stage, winner, raw)
+        val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
+        val snapshot = "STAGE: $stage\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $publicOrPersonalStake\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
+        if (snapshot != lastText) { lastText = snapshot; saveSnapshot(snapshot) }
+        prefs.edit().putInt("scan_count", scans).putInt("frames_received", frames).putString("last_status", snapshot).putString("last_text", snapshot).apply()
+        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage\nAndar: $andarTotal • Bahar: $baharTotal\nOdds: 1:$oddsA / 1:$oddsB\nCards dealt: $dealt\nWinner: $winner" }
     }
 
+    private fun updateRoundState(stage: String, winner: String, raw: String) {
+        if (stage == "PLACE BET" && roundPhase != "BETTING") {
+            roundPhase = "BETTING"; roundId = System.currentTimeMillis()
+            prefs.edit().putString("round_phase", roundPhase).putLong("active_round_id", roundId).apply()
+        }
+        if (stage == "BET LOCKED" && roundPhase == "BETTING") {
+            roundPhase = "LOCKED"; prefs.edit().putString("round_phase", roundPhase).apply()
+        }
+        if (winner != "NOT DETECTED" && (roundPhase == "LOCKED" || roundPhase == "BETTING")) {
+            val rounds = readArray("rounds")
+            val personalStake = prefs.getString("my_stake", "") ?: ""
+            val side = prefs.getString("my_side", "NONE") ?: "NONE"
+            val oddsText = if (side == "ANDAR") Regex("(?i)ANDAR[^|\\n]*?1:([0-9.]+)").find(raw)?.groupValues?.get(1) else Regex("(?i)BAHAR[^|\\n]*?1:([0-9.]+)").find(raw)?.groupValues?.get(1)
+            val stake = personalStake.toDoubleOrNull()
+            val odds = oddsText?.toDoubleOrNull()
+            val pnl = if (stake != null && stake > 0 && side in listOf("ANDAR","BAHAR") && odds != null && odds >= 1.0) {
+                if (side == winner) stake * (odds - 1.0) else -stake
+            } else null
+            val row = JSONObject().put("id", roundId.takeIf { it > 0 } ?: System.currentTimeMillis()).put("time", System.currentTimeMillis()).put("winner", winner).put("source", "explicit OCR result text").put("mySide", side).put("myStake", personalStake).put("pnl", pnl ?: JSONObject.NULL)
+            rounds.put(row)
+            val keep = JSONArray(); for (i in (rounds.length()-499).coerceAtLeast(0) until rounds.length()) keep.put(rounds.getJSONObject(i))
+            prefs.edit().putString("rounds", keep.toString()).putInt("round_count", keep.length()).putString("round_phase", "RESULT").apply()
+            roundPhase = "RESULT"
+        }
+    }
+
+    private fun readArray(key: String) = try { JSONArray(prefs.getString(key, "[]")) } catch (_: Exception) { JSONArray() }
+    private fun saveSnapshot(text: String) {
+        val old = readArray("history"); val arr = JSONArray()
+        for (i in (old.length()-999).coerceAtLeast(0) until old.length()) arr.put(old.getJSONObject(i))
+        arr.put(JSONObject().put("time", System.currentTimeMillis()).put("text", text.take(4000)))
+        prefs.edit().putString("history", arr.toString()).putInt("history_count", arr.length()).apply()
+    }
+    private fun saveStatus(message: String) { prefs.edit().putString("last_status", message).apply(); status?.post { status?.text = message } }
+    private fun formatNum(v: Double) = if (v % 1.0 == 0.0) v.toLong().toString() else String.format(java.util.Locale.US, "%.2f", v)
     private fun imageToBitmap(image: Image): android.graphics.Bitmap {
-        val plane = image.planes[0]
-        val buffer: ByteBuffer = plane.buffer
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val paddedWidth = image.width + (rowStride - pixelStride * image.width) / pixelStride
-        val padded = android.graphics.Bitmap.createBitmap(paddedWidth, image.height, android.graphics.Bitmap.Config.ARGB_8888)
-        padded.copyPixelsFromBuffer(buffer)
-        val cropped = android.graphics.Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
-        padded.recycle()
-        return cropped
+        val p=image.planes[0]; val stride=p.rowStride; val pixel=p.pixelStride
+        val paddedWidth=image.width+(stride-pixel*image.width)/pixel
+        val padded=android.graphics.Bitmap.createBitmap(paddedWidth,image.height,android.graphics.Bitmap.Config.ARGB_8888)
+        padded.copyPixelsFromBuffer(p.buffer)
+        val cropped=android.graphics.Bitmap.createBitmap(padded,0,0,image.width,image.height); padded.recycle(); return cropped
     }
 
     private fun showFloatingPanel() {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return }
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(12, 10, 12, 10)
-            setBackgroundColor(0xEE14212B.toInt())
-        }
-        val heading = TextView(this).apply { text = "GAME X-RAY • LIVE"; textSize = 13f; setTextColor(0xFF55DDFF.toInt()) }
-        status = TextView(this).apply { text = "Screen capture active"; textSize = 11f; setTextColor(0xFFFFFFFF.toInt()); maxLines = 12 }
-        val stop = Button(this).apply { text = "STOP"; setOnClickListener { stopSelf() } }
-        box.addView(heading); box.addView(status); box.addView(stop)
-
-        val type = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            type, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.END; x = 12; y = 120 }
-
-        box.setOnTouchListener(object : android.view.View.OnTouchListener {
-            var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
-            override fun onTouch(v: android.view.View, event: MotionEvent): Boolean {
-                when (event.action) {
-                    MotionEvent.ACTION_DOWN -> { sx = params.x; sy = params.y; tx = event.rawX; ty = event.rawY; return true }
-                    MotionEvent.ACTION_MOVE -> {
-                        params.x = sx - (event.rawX - tx).toInt()
-                        params.y = sy + (event.rawY - ty).toInt()
-                        windowManager?.updateViewLayout(box, params); return true
-                    }
-                }
-                return false
-            }
+        windowManager=getSystemService(WINDOW_SERVICE) as WindowManager
+        val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(12,10,12,10); setBackgroundColor(0xEE14212B.toInt()) }
+        box.addView(TextView(this).apply { text="GAME X-RAY • LIVE"; textSize=13f; setTextColor(0xFF55DDFF.toInt()) })
+        status=TextView(this).apply { text="Screen capture active"; textSize=11f; setTextColor(0xFFFFFFFF.toInt()); maxLines=10 }
+        box.addView(status); box.addView(Button(this).apply { text="STOP"; setOnClickListener { stopSelf() } })
+        val type=if(Build.VERSION.SDK_INT>=26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+        val params=WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT,WindowManager.LayoutParams.WRAP_CONTENT,type,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE,PixelFormat.TRANSLUCENT).apply { gravity=Gravity.TOP or Gravity.END; x=12; y=120 }
+        box.setOnTouchListener(object: android.view.View.OnTouchListener {
+            var sx=0; var sy=0; var tx=0f; var ty=0f
+            override fun onTouch(v:android.view.View,e:MotionEvent):Boolean { when(e.action){ MotionEvent.ACTION_DOWN->{sx=params.x;sy=params.y;tx=e.rawX;ty=e.rawY;return true}; MotionEvent.ACTION_MOVE->{params.x=sx-(e.rawX-tx).toInt();params.y=sy+(e.rawY-ty).toInt();windowManager?.updateViewLayout(box,params);return true} };return false }
         })
-        overlay = box
-        windowManager?.addView(box, params)
+        overlay=box; windowManager?.addView(box,params)
     }
-
     override fun onDestroy() {
-        prefs.edit().putInt("scan_count", scans).putInt("frames_received", framesReceived)
-            .putString("last_text", lastText).apply()
-        try { overlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
-        display?.release()
-        reader?.close()
-        projection?.stop()
-        recognizer.close()
-        super.onDestroy()
+        prefs.edit().putInt("scan_count",scans).putInt("frames_received",frames).putString("last_text",lastText).apply()
+        try { overlay?.let { windowManager?.removeView(it) } } catch (_:Exception) {}
+        display?.release(); reader?.close(); projection?.stop(); recognizer.close(); super.onDestroy()
     }
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent:Intent?):IBinder?=null
 }
