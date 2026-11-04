@@ -108,9 +108,10 @@ class CaptureService : Service() {
     private fun analyze(result: Text, lines: List<String>) {
         val raw = lines.joinToString(" | ").take(4000)
         val normalized = raw.uppercase().replace(Regex("\\s+"), " ")
+        // BET LOCKED takes precedence when both labels appear in one OCR frame.
         val stage = when {
+            Regex("\\bBET\\s+LOCKED\\b").containsMatchIn(normalized) -> "BET LOCKED"
             Regex("\\bPLACE\\s+BET\\b").containsMatchIn(normalized) -> "PLACE BET"
-            Regex("\\bBET\\s+LOCKED\\b|\\bLOCKED\\b").containsMatchIn(normalized) -> "BET LOCKED"
             else -> "NOT DETECTED"
         }
         fun moneyNear(label: String): String {
@@ -141,11 +142,21 @@ class CaptureService : Service() {
         val pA = percentages?.groupValues?.get(1)?.toDoubleOrNull()
         val pB = percentages?.groupValues?.get(2)?.toDoubleOrNull()
         val pct = if (pA != null && pB != null && pA in 0.0..100.0 && pB in 0.0..100.0 && abs(pA+pB-100.0)<=2.0) "Andar ${formatNum(pA)}% / Bahar ${formatNum(pB)}%" else "not reliably detected"
-        val winner = when {
-            Regex("(?i)\\bANDAR\\b.{0,30}\\b(WIN|WON|WINNER)\\b|\\b(WIN|WON|WINNER)\\b.{0,30}\\bANDAR\\b").containsMatchIn(normalized) -> "ANDAR"
-            Regex("(?i)\\bBAHAR\\b.{0,30}\\b(WIN|WON|WINNER)\\b|\\b(WIN|WON|WINNER)\\b.{0,30}\\bBAHAR\\b").containsMatchIn(normalized) -> "BAHAR"
-            else -> "NOT DETECTED"
+        // Require result wording on the same OCR line as the side; ignore promotional winner labels.
+        fun explicitWinnerOnLine(line: String): String {
+            val u = line.uppercase()
+            if (u.contains("BIGGEST WINNER") || u.contains("TOP WINNER")) return "NOT DETECTED"
+            if (!Regex("\\b(WINS|WON|WINNER|RESULT)\\b").containsMatchIn(u)) return "NOT DETECTED"
+            val hasA = Regex("\\bANDAR\\b").containsMatchIn(u)
+            val hasB = Regex("\\bBAHAR\\b").containsMatchIn(u)
+            return when {
+                hasA && !hasB -> "ANDAR"
+                hasB && !hasA -> "BAHAR"
+                else -> "NOT DETECTED"
+            }
         }
+        val winner = lines.asSequence().map { explicitWinnerOnLine(it) }
+            .firstOrNull { it != "NOT DETECTED" } ?: "NOT DETECTED"
         updateRoundState(stage, winner, raw)
         val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
         val snapshot = "STAGE: $stage\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $publicOrPersonalStake\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
@@ -156,26 +167,37 @@ class CaptureService : Service() {
 
     private fun updateRoundState(stage: String, winner: String, raw: String) {
         if (stage == "PLACE BET" && roundPhase != "BETTING") {
-            roundPhase = "BETTING"; roundId = System.currentTimeMillis()
+            roundPhase = "BETTING"
+            roundId = System.currentTimeMillis()
             prefs.edit().putString("round_phase", roundPhase).putLong("active_round_id", roundId).apply()
         }
         if (stage == "BET LOCKED" && roundPhase == "BETTING") {
-            roundPhase = "LOCKED"; prefs.edit().putString("round_phase", roundPhase).apply()
+            roundPhase = "LOCKED"
+            prefs.edit().putString("round_phase", roundPhase).apply()
         }
-        if (winner != "NOT DETECTED" && (roundPhase == "LOCKED" || roundPhase == "BETTING")) {
+        // Save at most once, and only after BET LOCKED for the active round.
+        if (winner != "NOT DETECTED" && roundPhase == "LOCKED" && roundId > 0L) {
+            if (prefs.getLong("last_saved_round_id", 0L) == roundId) return
             val rounds = readArray("rounds")
             val personalStake = prefs.getString("my_stake", "") ?: ""
             val side = prefs.getString("my_side", "NONE") ?: "NONE"
-            val oddsText = if (side == "ANDAR") Regex("(?i)ANDAR[^|\\n]*?1:([0-9.]+)").find(raw)?.groupValues?.get(1) else Regex("(?i)BAHAR[^|\\n]*?1:([0-9.]+)").find(raw)?.groupValues?.get(1)
+            val oddsText = if (side == "ANDAR")
+                Regex("(?i)ANDAR[^|\\n]*?1\\s*[:/]\\s*([0-9.]+)").find(raw)?.groupValues?.get(1)
+            else if (side == "BAHAR")
+                Regex("(?i)BAHAR[^|\\n]*?1\\s*[:/]\\s*([0-9.]+)").find(raw)?.groupValues?.get(1)
+            else null
             val stake = personalStake.toDoubleOrNull()
             val odds = oddsText?.toDoubleOrNull()
-            val pnl = if (stake != null && stake > 0 && side in listOf("ANDAR","BAHAR") && odds != null && odds >= 1.0) {
+            val pnl = if (stake != null && stake > 0 && side in listOf("ANDAR", "BAHAR") && odds != null && odds >= 1.0) {
                 if (side == winner) stake * (odds - 1.0) else -stake
             } else null
-            val row = JSONObject().put("id", roundId.takeIf { it > 0 } ?: System.currentTimeMillis()).put("time", System.currentTimeMillis()).put("winner", winner).put("source", "explicit OCR result text").put("mySide", side).put("myStake", personalStake).put("pnl", pnl ?: JSONObject.NULL)
-            rounds.put(row)
-            val keep = JSONArray(); for (i in (rounds.length()-499).coerceAtLeast(0) until rounds.length()) keep.put(rounds.getJSONObject(i))
-            prefs.edit().putString("rounds", keep.toString()).putInt("round_count", keep.length()).putString("round_phase", "RESULT").apply()
+            rounds.put(JSONObject().put("id", roundId).put("time", System.currentTimeMillis())
+                .put("winner", winner).put("source", "explicit same-line OCR result")
+                .put("mySide", side).put("myStake", personalStake).put("pnl", pnl ?: JSONObject.NULL))
+            val keep = JSONArray()
+            for (i in (rounds.length() - 499).coerceAtLeast(0) until rounds.length()) keep.put(rounds.getJSONObject(i))
+            prefs.edit().putString("rounds", keep.toString()).putInt("round_count", keep.length())
+                .putLong("last_saved_round_id", roundId).putString("round_phase", "RESULT").apply()
             roundPhase = "RESULT"
         }
     }
