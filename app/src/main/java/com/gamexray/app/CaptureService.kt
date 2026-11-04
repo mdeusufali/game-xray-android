@@ -114,29 +114,43 @@ class CaptureService : Service() {
             Regex("\\bPLACE\\s+BET\\b").containsMatchIn(normalized) -> "PLACE BET"
             else -> "NOT DETECTED"
         }
-        fun moneyNear(label: String): String {
-            val line = lines.firstOrNull { it.contains(label, true) } ?: return "not detected"
-            val match = Regex("(?i)" + Regex.escape(label) + "[^0-9]{0,24}([0-9][0-9,]*(?:\\.[0-9]{1,2})?)").find(line)
-                ?: Regex("([0-9][0-9,]*(?:\\.[0-9]{1,2})?)").find(line)
-            val n = match?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
-            return n?.takeIf { it in 0.01..100000000.0 }?.let { formatNum(it) } ?: "not detected"
+        // Never treat a bare percentage or an odds ratio as a panel money total.
+        fun panelTotal(side: String): String {
+            val patterns = listOf(
+                Regex("(?i)\\b(?:TOTAL|AMOUNT|BET\\s*AMOUNT)\\s+" + side + "\\b\\s*[:=-]?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)"),
+                Regex("(?i)\\b" + side + "\\s+(?:TOTAL|AMOUNT|BET\\s*AMOUNT)\\b\\s*[:=-]?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)")
+            )
+            for (line in lines) {
+                if (line.contains("%") || Regex("1\\s*[:/]\\s*[0-9]").containsMatchIn(line)) continue
+                for (pattern in patterns) {
+                    val value = pattern.find(line)?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
+                    if (value != null && value in 0.01..100000000.0) return formatNum(value)
+                }
+            }
+            return "not detected"
         }
-        fun oddsFor(label: String): String {
-            val line = lines.firstOrNull { it.contains(label, true) } ?: raw
-            val m = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)").find(line) ?: return "not detected"
-            val v = m.groupValues[1].toDoubleOrNull()
-            return v?.takeIf { it in 1.0..1000.0 }?.let { formatNum(it) } ?: "not detected"
+        fun oddsFor(side: String): String {
+            val sideIndex = lines.indexOfFirst { Regex("\\b" + side + "\\b", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+            val candidates = if (sideIndex >= 0) {
+                ((sideIndex - 1).coerceAtLeast(0)..(sideIndex + 2).coerceAtMost(lines.lastIndex)).map { lines[it] }
+            } else emptyList()
+            val pattern = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)")
+            for (line in candidates) {
+                val value = pattern.find(line)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                if (value != null && value in 1.01..1000.0) return formatNum(value)
+            }
+            return "not detected"
         }
         val andarPanel = lines.filter { it.contains("ANDAR", true) }.joinToString(" / ").take(400)
         val baharPanel = lines.filter { it.contains("BAHAR", true) }.joinToString(" / ").take(400)
-        val andarTotal = moneyNear("ANDAR")
-        val baharTotal = moneyNear("BAHAR")
+        val andarTotal = panelTotal("ANDAR")
+        val baharTotal = panelTotal("BAHAR")
         val oddsA = oddsFor("ANDAR")
         val oddsB = oddsFor("BAHAR")
         val dealtLine = lines.firstOrNull { it.contains("CARDS", true) && it.contains("DEALT", true) } ?: ""
         val dealt = Regex("(?i)CARDS\\s+DEALT\\s*[:#-]?\\s*(\\d{1,2})").find(dealtLine)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..52 }?.toString() ?: "not detected"
         val stakeLine = lines.firstOrNull { it.contains("TOTAL STAKE", true) } ?: ""
-        val publicOrPersonalStake = Regex("(?i)TOTAL\\s+STAKE\\s*[:#-]?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)").find(stakeLine)?.groupValues?.get(1)?.replace(",", "")?.toDoubleOrNull()?.takeIf { it in 0.01..100000000.0 }?.let { formatNum(it) } ?: "not detected"
+        val visibleStakeLabel = if (stakeLine.isNotBlank()) "visible label only; not assumed to be personal stake" else "not detected"
         val histLine = lines.filter { it.contains("%") || it.contains("HISTORY", true) || it.contains("LAST", true) }.joinToString(" | ").take(600)
         val percentages = Regex("(?i)ANDAR\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%.*?BAHAR\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%").find(histLine)
         val pA = percentages?.groupValues?.get(1)?.toDoubleOrNull()
@@ -159,7 +173,7 @@ class CaptureService : Service() {
             .firstOrNull { it != "NOT DETECTED" } ?: "NOT DETECTED"
         updateRoundState(stage, winner, raw)
         val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
-        val snapshot = "STAGE: $stage\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $publicOrPersonalStake\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
+        val snapshot = "STAGE: $stage\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
         if (snapshot != lastText) { lastText = snapshot; saveSnapshot(snapshot) }
         prefs.edit().putInt("scan_count", scans).putInt("frames_received", frames).putString("last_status", snapshot).putString("last_text", snapshot).apply()
         status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage\nAndar: $andarTotal • Bahar: $baharTotal\nOdds: 1:$oddsA / 1:$oddsB\nCards dealt: $dealt\nWinner: $winner" }
