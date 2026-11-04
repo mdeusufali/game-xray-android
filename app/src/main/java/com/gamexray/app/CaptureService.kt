@@ -50,7 +50,7 @@ class CaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("gx", "Game X-Ray capture", NotificationManager.IMPORTANCE_LOW))
-        val notification = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "gx") else @Suppress("DEPRECATION") Notification.Builder(this)
+        val notification = Notification.Builder(this, "gx")
         startForeground(7, notification.setContentTitle("Game X-Ray is capturing").setContentText("Local screen OCR active").setSmallIcon(android.R.drawable.ic_menu_view).build())
         val code = intent?.getIntExtra("resultCode", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         @Suppress("DEPRECATION") val data = intent?.getParcelableExtra<Intent>("resultData")
