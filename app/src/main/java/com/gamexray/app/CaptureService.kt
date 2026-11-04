@@ -145,8 +145,8 @@ class CaptureService : Service() {
                     val baharPanel = results[2].text.replace("\n", " ").trim().take(250)
                     val andarTotalRaw = results[3].text.replace("\n", " ").trim().take(100)
                     val baharTotalRaw = results[4].text.replace("\n", " ").trim().take(100)
-                    val personalStake = results[5].text.replace("\n", " ").trim().take(160)
-                    val dealtText = results[6].text.replace("\n", " ").take(180)
+                    val dealtText = results[5].text.replace("\n", " ").trim().take(180)
+                    val personalStake = results[6].text.replace("\n", " ").take(160)
                     val stats = results[7].text.replace("\n", " ").take(350)
                     val betting = "ANDAR: $andarPanel | BAHAR: $baharPanel"
                     val full = "BETTING ANALYSIS (raw OCR; verify visually)\nSTAGE: $stageText\nANDAR_PANEL: $andarPanel\nBAHAR_PANEL: $baharPanel\nANDAR_TOTAL: $andarTotalRaw\nBAHAR_TOTAL: $baharTotalRaw\nPERSONAL_STAKE: $personalStake\nDEALT: $dealtText\nHISTORY_STATS: $stats"
@@ -212,8 +212,8 @@ class CaptureService : Service() {
         val old = try { JSONArray(prefs.getString("history", "[]")) } catch (_: Exception) { JSONArray() }
         val entry = JSONObject().put("time", System.currentTimeMillis()).put("text", text.take(1200))
         val updated = JSONArray()
-        // Keep the newest 49 old entries, then append the new one: maximum 50.
-        val start = (old.length() - 49).coerceAtLeast(0)
+        // Keep the newest 999 old entries, then append the new one: maximum 1000.
+        val start = (old.length() - 999).coerceAtLeast(0)
         for (i in start until old.length()) updated.put(old.getJSONObject(i))
         updated.put(entry)
         prefs.edit()
