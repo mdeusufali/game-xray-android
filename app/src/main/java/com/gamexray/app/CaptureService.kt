@@ -190,12 +190,19 @@ class CaptureService : Service() {
     }
 
     private fun updateRoundState(stage: String, winner: String, raw: String) {
-        // Start a new round only on a fresh PLACE BET phase, not on every repeated OCR frame.
-        // If a result is still visible on the transition frame, process it before opening the next round.
-        if (stage == "PLACE BET" && winner == "NOT DETECTED" && roundPhase in listOf("IDLE", "RESULT")) {
+        // PLACE BET after LOCKED is the next round boundary. If no explicit
+        // winner was seen, leave the previous round unrecorded rather than guessing.
+        // Repeated PLACE BET frames during BETTING keep the same round ID.
+        if (stage == "PLACE BET" && winner == "NOT DETECTED" && roundPhase in listOf("IDLE", "RESULT", "LOCKED")) {
             roundPhase = "BETTING"
             roundId = System.currentTimeMillis()
-            prefs.edit().putString("round_phase", roundPhase).putLong("active_round_id", roundId).apply()
+            prefs.edit()
+                .putString("round_phase", roundPhase)
+                .putLong("active_round_id", roundId)
+                .putString("round_my_side", prefs.getString("my_side", "NONE") ?: "NONE")
+                .putString("round_my_stake", prefs.getString("my_stake", "") ?: "")
+                .putString("round_my_odds", prefs.getString("my_odds", "") ?: "")
+                .apply()
         }
         if (stage == "BET LOCKED" && roundPhase == "BETTING") {
             roundPhase = "LOCKED"
