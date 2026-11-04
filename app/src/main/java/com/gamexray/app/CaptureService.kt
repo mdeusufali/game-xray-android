@@ -181,7 +181,23 @@ class CaptureService : Service() {
                     else "Historical percentages: not clearly detected (raw OCR retained below)"
                     val stakeMatch = Regex("(?i)Total\\s*Stake\\s*[: ]*([0-9]+(?:\\.[0-9]+)?)").find(personalStake)?.groupValues?.getOrNull(1)
                     val personalStakeLine = stakeMatch?.let { "Personal Total Stake: $it" } ?: "Personal Total Stake: not detected"
-                    val summary = "Scans: $scans\\nFrames received: $framesReceived\\nGame stage: $stage\\nAndar panel total: $andarAmount\\nBahar panel total: $baharAmount\\nPanel combined total: $panelSum\\n$oddsLine\\n$personalStakeLine\\nCards dealt counter: $dealt\\n$percentLine\\nRound winner: not detected (explicit result text required)\\nAndar raw: $andarPanel [$andarTotalRaw]\\nBahar raw: $baharPanel [$baharTotalRaw]\\nHistory stats (raw): $stats"
+                    val winner = when {
+                        Regex("(?i)ANDAR.{0,20}(WIN|WON)|(?:WIN|WON).{0,20}ANDAR").containsMatchIn(full) -> "ANDAR"
+                        Regex("(?i)BAHAR.{0,20}(WIN|WON)|(?:WIN|WON).{0,20}BAHAR").containsMatchIn(full) -> "BAHAR"
+                        else -> "not detected"
+                    }
+                    if (winner != "not detected") {
+                        val rounds = try { JSONArray(prefs.getString("rounds", "[]")) } catch (_: Exception) { JSONArray() }
+                        val last = if (rounds.length() > 0) rounds.optJSONObject(rounds.length()-1)?.optString("winner") else null
+                        if (last != winner) {
+                            val updated = JSONArray()
+                            val startRound = (rounds.length() - 499).coerceAtLeast(0)
+                            for (i in startRound until rounds.length()) updated.put(rounds.getJSONObject(i))
+                            updated.put(JSONObject().put("time", System.currentTimeMillis()).put("winner", winner).put("source", "explicit OCR text"))
+                            prefs.edit().putString("rounds", updated.toString()).putInt("round_count", updated.length()).apply()
+                        }
+                    }
+                    val summary = "Scans: $scans\\nFrames received: $framesReceived\\nGame stage: $stage\\nAndar panel total: $andarAmount\\nBahar panel total: $baharAmount\\nPanel combined total: $panelSum\\n$oddsLine\\n$personalStakeLine\\nCards dealt counter: $dealt\\n$percentLine\\nRound winner: $winner (only explicit OCR result text)\\nAndar raw: $andarPanel [$andarTotalRaw]\\nBahar raw: $baharPanel [$baharTotalRaw]\\nHistory stats (raw): $stats\nProfit/Loss: not calculated (personal bet side and confirmed stake are required)"
                     prefs.edit().putInt("scan_count", scans).apply()
                     if (full != lastText) {
                         lastText = full
