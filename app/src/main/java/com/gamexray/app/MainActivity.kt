@@ -81,7 +81,13 @@ class MainActivity : Activity() {
             if(!r.isNull("pnl")){pnl+=r.optDouble("pnl");pnlCount++}
         }
         val coverage=if(winners>0) "Recorded outcomes: $winners (not necessarily 200)" else "No confirmed outcomes yet"
-        val sampleCount=andar+bahar\n        val stats=if(sampleCount>0) "Last $sampleCount confirmed saved rounds (max 200): Andar $andar (${String.format(Locale.US, "%.1f", andar*100.0/sampleCount)}%) / Bahar $bahar (${String.format(Locale.US, "%.1f", bahar*100.0/sampleCount)}%)" else "Last-200 statistics: unavailable until confirmed results are captured"
+        val sampleStart=(rounds.length()-200).coerceAtLeast(0)
+        var andar200=0; var bahar200=0
+        for(i in sampleStart until rounds.length()){
+            when(rounds.optJSONObject(i)?.optString("winner")){"ANDAR"->andar200++;"BAHAR"->bahar200++}
+        }
+        val sampleCount=andar200+bahar200
+        val stats=if(sampleCount>0) "Last $sampleCount confirmed saved rounds (max 200): Andar $andar200 (${String.format(Locale.US, "%.1f", andar200*100.0/sampleCount)}%) / Bahar $bahar200 (${String.format(Locale.US, "%.1f", bahar200*100.0/sampleCount)}%)" else "Last-200 statistics: unavailable until confirmed results are captured"
         val last=p.getString("last_status","No OCR data yet") ?: "No OCR data yet"
         dashboard.text="Capture frames: $frames\nOCR scans: $scans\nSnapshots retained: ${snapshots.length()} / 1000\nRound records retained: $winners / 500\nMy selected side: $side\nMy stake: ${if(stake.isBlank()) "not set" else stake}\n$coverage\n$stats\nP/L: ${if(pnlCount>0) String.format(Locale.US,"%.2f (from $pnlCount fully calculated rounds)",pnl) else "not calculated — confirmed winner + my side/stake + readable odds required"}\n\nLATEST OCR DASHBOARD\n$last\n\nNote: OCR-visible history percentages are shown only when validated. No prediction or guaranteed win claim."
         val fmt=SimpleDateFormat("yyyy-MM-dd HH:mm:ss",Locale.getDefault())
