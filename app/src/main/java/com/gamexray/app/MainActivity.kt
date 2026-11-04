@@ -20,6 +20,7 @@ class MainActivity : Activity() {
     private lateinit var dashboard:TextView
     private lateinit var history:TextView
     private lateinit var stakeInput:EditText
+    private lateinit var oddsInput:EditText
     private lateinit var sideSpinner:Spinner
 
     override fun onCreate(savedInstanceState:Bundle?) {
@@ -46,11 +47,22 @@ class MainActivity : Activity() {
         body.addView(sideSpinner)
         stakeInput=EditText(this).apply { hint="নিজের Stake amount"; inputType=android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL; setText(prefs.getString("my_stake","") ?: "") }
         body.addView(stakeInput)
+        oddsInput=EditText(this).apply {
+            hint="নিজের bet-এর odds (যেমন 1.9) — ঐচ্ছিক"
+            inputType=android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setText(prefs.getString("my_odds","") ?: "")
+        }
+        body.addView(oddsInput)
         body.addView(Button(this).apply { text="Save my bet settings"; setOnClickListener {
-            val amount=stakeInput.text.toString().trim().toDoubleOrNull()
-            if(sideSpinner.selectedItem.toString()!="NONE" && (amount==null || amount<=0.0)){info.text="Stake amount valid number হতে হবে।";return@setOnClickListener}
-            prefs.edit().putString("my_side",sideSpinner.selectedItem.toString()).putString("my_stake",if(amount!=null) amount.toString() else "").apply()
-            info.text="My bet settings saved. P/L only recorded when winner and odds are explicitly readable."
+            val side=sideSpinner.selectedItem.toString()
+            val amountText=stakeInput.text.toString().trim()
+            val oddsText=oddsInput.text.toString().trim()
+            val amount=amountText.toDoubleOrNull()
+            val odds=oddsText.toDoubleOrNull()
+            if(side!="NONE" && (amount==null || amount<=0.0)){info.text="নিজের Stake সঠিক সংখ্যা হতে হবে।";return@setOnClickListener}
+            if(oddsText.isNotBlank() && (odds==null || odds<1.01 || odds>1000.0)){info.text="Odds 1.01 থেকে 1000-এর মধ্যে দিন।";return@setOnClickListener}
+            prefs.edit().putString("my_side",side).putString("my_stake",if(amount!=null) amount.toString() else "").putString("my_odds",if(odds!=null) odds.toString() else "").apply()
+            info.text="My bet settings saved. P/L uses only your entered stake/odds and an explicit OCR winner."
         }})
         body.addView(Button(this).apply { text="Refresh dashboard / history"; setOnClickListener { showData() } })
         body.addView(TextView(this).apply { text="\nLIVE DASHBOARD"; textSize=18f })
@@ -73,6 +85,7 @@ class MainActivity : Activity() {
         val rounds=readArray(p.getString("rounds","[]"))
         val scans=p.getInt("scan_count",0); val frames=p.getInt("frames_received",0)
         val side=p.getString("my_side","NONE") ?: "NONE"; val stake=p.getString("my_stake","") ?: ""
+        val myOdds=p.getString("my_odds","") ?: ""
         val winners=rounds.length()
         var andar=0; var bahar=0; var pnl=0.0; var pnlCount=0
         for(i in 0 until rounds.length()){
@@ -89,13 +102,14 @@ class MainActivity : Activity() {
         val sampleCount=andar200+bahar200
         val stats=if(sampleCount>0) "Last $sampleCount confirmed saved rounds (max 200): Andar $andar200 (${String.format(Locale.US, "%.1f", andar200*100.0/sampleCount)}%) / Bahar $bahar200 (${String.format(Locale.US, "%.1f", bahar200*100.0/sampleCount)}%)" else "Last-200 statistics: unavailable until confirmed results are captured"
         val last=p.getString("last_status","No OCR data yet") ?: "No OCR data yet"
-        dashboard.text="Capture frames: $frames\nOCR scans: $scans\nSnapshots retained: ${snapshots.length()} / 1000\nRound records retained: $winners / 500\nMy selected side: $side\nMy stake: ${if(stake.isBlank()) "not set" else stake}\n$coverage\n$stats\nP/L: ${if(pnlCount>0) String.format(Locale.US,"%.2f (from $pnlCount fully calculated rounds)",pnl) else "not calculated — confirmed winner + my side/stake + readable odds required"}\n\nLATEST OCR DASHBOARD\n$last\n\nNote: OCR-visible history percentages are shown only when validated. No prediction or guaranteed win claim."
+        dashboard.text="Capture frames: $frames\nOCR scans: $scans\nSnapshots retained: ${snapshots.length()} / 1000\nRound records retained: $winners / 500\nMy selected side: $side\nMy stake: ${if(stake.isBlank()) "not set" else stake}\nMy odds: ${if(myOdds.isBlank()) "not set" else "1:$myOdds"}\n$coverage\n$stats\nP/L: ${if(pnlCount>0) String.format(Locale.US,"%.2f (from $pnlCount fully calculated rounds)",pnl) else "not calculated — confirmed winner + my side/stake + readable odds required"}\n\nLATEST OCR DASHBOARD\n$last\n\nNote: OCR-visible history percentages are shown only when validated. No prediction or guaranteed win claim."
         val fmt=SimpleDateFormat("yyyy-MM-dd HH:mm:ss",Locale.getDefault())
         val out=StringBuilder("ROUND HISTORY (newest first)\n")
         for(i in rounds.length()-1 downTo 0){
             val r=rounds.optJSONObject(i)?:continue
             out.append(fmt.format(Date(r.optLong("time")))).append(" • ").append(r.optString("winner"))
             out.append(" • my bet ").append(r.optString("mySide","NONE")).append(" • stake ").append(r.optString("myStake","not set"))
+            if(r.optString("myOdds").isNotBlank()) out.append(" • odds 1:").append(r.optString("myOdds"))
             if(!r.isNull("pnl"))out.append(" • P/L ").append(r.optDouble("pnl"))
             else out.append(" • P/L unavailable")
             out.append("\n")
