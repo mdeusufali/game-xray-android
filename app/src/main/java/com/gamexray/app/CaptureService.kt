@@ -43,6 +43,8 @@ class CaptureService : Service() {
     private var lastText = ""
     private var roundPhase = "IDLE"
     private var roundId = 0L
+    private var lastCardsDealt = -1
+    private var lastStage = "NOT DETECTED"
     private val busy = AtomicBoolean(false)
     private val prefs by lazy { getSharedPreferences("game_xray_local", Context.MODE_PRIVATE) }
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
@@ -60,6 +62,8 @@ class CaptureService : Service() {
 
     private fun beginCapture(code: Int, data: Intent) {
         scans = prefs.getInt("scan_count", 0); frames = prefs.getInt("frames_received", 0)
+        roundPhase = prefs.getString("round_phase", "IDLE") ?: "IDLE"
+        roundId = prefs.getLong("active_round_id", 0L)
         val m = resources.displayMetrics
         val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projection = mgr.getMediaProjection(code, data)
@@ -131,11 +135,14 @@ class CaptureService : Service() {
         }
         fun oddsFor(side: String): String {
             val sideIndex = lines.indexOfFirst { Regex("\\b" + side + "\\b", RegexOption.IGNORE_CASE).containsMatchIn(it) }
-            val candidates = if (sideIndex >= 0) {
-                ((sideIndex - 1).coerceAtLeast(0)..(sideIndex + 2).coerceAtMost(lines.lastIndex)).map { lines[it] }
-            } else emptyList()
+            if (sideIndex < 0) return "not detected"
             val pattern = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)")
-            for (line in candidates) {
+            val candidates = listOf(sideIndex, sideIndex + 1, sideIndex - 1).filter { it in lines.indices }
+            for (index in candidates) {
+                val line = lines[index]
+                val upper = line.uppercase()
+                if (upper.contains("RANGE") || upper.contains("HISTORY") || upper.contains("BIGGEST") ||
+                    (upper.contains("ANDAR") && upper.contains("BAHAR"))) continue
                 val value = pattern.find(line)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
                 if (value != null && value in 1.01..1000.0) return formatNum(value)
             }
@@ -171,16 +178,21 @@ class CaptureService : Service() {
         }
         val winner = lines.asSequence().map { explicitWinnerOnLine(it) }
             .firstOrNull { it != "NOT DETECTED" } ?: "NOT DETECTED"
+        val cardsValue = dealt.toIntOrNull()
+        if (cardsValue != null && cardsValue in 1..52) lastCardsDealt = cardsValue
+        if (stage != "NOT DETECTED") lastStage = stage
         updateRoundState(stage, winner, raw)
         val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
-        val snapshot = "STAGE: $stage\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
+        val snapshot = "STAGE: $stage\nROUND PHASE: $roundPhase\nROUND ID: $roundId\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
         if (snapshot != lastText) { lastText = snapshot; saveSnapshot(snapshot) }
         prefs.edit().putInt("scan_count", scans).putInt("frames_received", frames).putString("last_status", snapshot).putString("last_text", snapshot).apply()
-        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage\nAndar: $andarTotal • Bahar: $baharTotal\nOdds: 1:$oddsA / 1:$oddsB\nCards dealt: $dealt\nWinner: $winner" }
+        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage • round $roundId\nAndar total: $andarTotal • Bahar total: $baharTotal\nOdds: 1:$oddsA / 1:$oddsB\nCards dealt: $dealt\nWinner: $winner" }
     }
 
     private fun updateRoundState(stage: String, winner: String, raw: String) {
-        if (stage == "PLACE BET" && roundPhase != "BETTING") {
+        // Start a new round only on a fresh PLACE BET phase, not on every repeated OCR frame.
+        // If a result is still visible on the transition frame, process it before opening the next round.
+        if (stage == "PLACE BET" && winner == "NOT DETECTED" && roundPhase in listOf("IDLE", "RESULT")) {
             roundPhase = "BETTING"
             roundId = System.currentTimeMillis()
             prefs.edit().putString("round_phase", roundPhase).putLong("active_round_id", roundId).apply()
@@ -195,19 +207,16 @@ class CaptureService : Service() {
             val rounds = readArray("rounds")
             val personalStake = prefs.getString("my_stake", "") ?: ""
             val side = prefs.getString("my_side", "NONE") ?: "NONE"
-            val oddsText = if (side == "ANDAR")
-                Regex("(?i)ANDAR[^|\\n]*?1\\s*[:/]\\s*([0-9.]+)").find(raw)?.groupValues?.get(1)
-            else if (side == "BAHAR")
-                Regex("(?i)BAHAR[^|\\n]*?1\\s*[:/]\\s*([0-9.]+)").find(raw)?.groupValues?.get(1)
-            else null
+            // P/L uses the user's explicitly saved personal odds, never a nearby public/range odds label.
+            val personalOdds = prefs.getString("my_odds", "") ?: ""
             val stake = personalStake.toDoubleOrNull()
-            val odds = oddsText?.toDoubleOrNull()
+            val odds = personalOdds.toDoubleOrNull()
             val pnl = if (stake != null && stake > 0 && side in listOf("ANDAR", "BAHAR") && odds != null && odds >= 1.0) {
                 if (side == winner) stake * (odds - 1.0) else -stake
             } else null
             rounds.put(JSONObject().put("id", roundId).put("time", System.currentTimeMillis())
                 .put("winner", winner).put("source", "explicit same-line OCR result")
-                .put("mySide", side).put("myStake", personalStake).put("pnl", pnl ?: JSONObject.NULL))
+                .put("mySide", side).put("myStake", personalStake).put("myOdds", personalOdds).put("pnl", pnl ?: JSONObject.NULL))
             val keep = JSONArray()
             for (i in (rounds.length() - 499).coerceAtLeast(0) until rounds.length()) keep.put(rounds.getJSONObject(i))
             prefs.edit().putString("rounds", keep.toString()).putInt("round_count", keep.length())
