@@ -154,8 +154,14 @@ class CaptureService : Service() {
         val baharTotal = panelTotal("BAHAR")
         val oddsA = oddsFor("ANDAR")
         val oddsB = oddsFor("BAHAR")
-        val dealtLine = lines.firstOrNull { it.contains("CARDS", true) && it.contains("DEALT", true) } ?: ""
-        val dealt = Regex("(?i)CARDS\\s+DEALT\\s*[:#-]?\\s*(\\d{1,2})").find(dealtLine)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..52 }?.toString() ?: "not detected"
+        val dealtIndex = lines.indexOfFirst { it.contains("CARDS", true) && it.contains("DEALT", true) }
+        val dealtInline = if (dealtIndex >= 0) Regex("(?i)CARDS\\s+DEALT\\s*[:#-]?\\s*(\\d{1,2})").find(lines[dealtIndex])?.groupValues?.get(1) else null
+        // Some layouts put the card count on the line immediately below the label.
+        // Only accept an adjacent standalone 1..52 value; never search unrelated screen numbers.
+        val dealtNext = if (dealtIndex >= 0 && dealtIndex + 1 < lines.size) {
+            Regex("^\\d{1,2}$").matchEntire(lines[dealtIndex + 1].trim())?.value
+        } else null
+        val dealt = (dealtInline ?: dealtNext)?.toIntOrNull()?.takeIf { it in 1..52 }?.toString() ?: "not detected"
         val stakeLine = lines.firstOrNull { it.contains("TOTAL STAKE", true) } ?: ""
         val visibleStakeLabel = if (stakeLine.isNotBlank()) "visible label only; not assumed to be personal stake" else "not detected"
         val histLine = lines.filter { it.contains("%") || it.contains("HISTORY", true) || it.contains("LAST", true) }.joinToString(" | ").take(600)
