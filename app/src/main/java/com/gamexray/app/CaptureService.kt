@@ -143,8 +143,8 @@ class CaptureService : Service() {
             val candidates = canonicalLines.indices
                 .filter { i ->
                     val u = canonicalLines[i].uppercase().trim()
-                    val cleanSide = Regex("^" + side + "[\\\\s.:!_-]*$").matches(u)
-                    val sameLineSide = Regex("\\\\b" + side + "\\\\b").containsMatchIn(u) &&
+                    val cleanSide = Regex("^" + side + "[\\s.:!_-]*$").matches(u)
+                    val sameLineSide = Regex("\\b" + side + "\\b").containsMatchIn(u) &&
                         !u.contains("BIGGEST") && !u.contains("HISTORY") && !u.contains("LAST")
                     cleanSide || sameLineSide
                 }
