@@ -88,10 +88,16 @@ class MainActivity : Activity() {
         val myOdds=p.getString("my_odds","") ?: ""
         val winners=rounds.length()
         var andar=0; var bahar=0; var pnl=0.0; var pnlCount=0
+        var wins=0; var losses=0; var totalStake=0.0; var grossProfit=0.0; var grossLoss=0.0
         for(i in 0 until rounds.length()){
             val r=rounds.optJSONObject(i) ?: continue
             when(r.optString("winner")){"ANDAR"->andar++;"BAHAR"->bahar++}
-            if(!r.isNull("pnl")){pnl+=r.optDouble("pnl");pnlCount++}
+            if(!r.isNull("pnl")){
+                val value=r.optDouble("pnl")
+                pnl+=value; pnlCount++
+                if(value>0){wins++;grossProfit+=value}else if(value<0){losses++;grossLoss+=-value}
+                totalStake+=r.optString("myStake").toDoubleOrNull() ?: 0.0
+            }
         }
         val coverage=if(winners>0) "Recorded outcomes: $winners (not necessarily 200)" else "No confirmed outcomes yet"
         val sampleStart=(rounds.length()-200).coerceAtLeast(0)
@@ -102,7 +108,7 @@ class MainActivity : Activity() {
         val sampleCount=andar200+bahar200
         val stats=if(sampleCount>0) "Last $sampleCount confirmed saved rounds (max 200): Andar $andar200 (${String.format(Locale.US, "%.1f", andar200*100.0/sampleCount)}%) / Bahar $bahar200 (${String.format(Locale.US, "%.1f", bahar200*100.0/sampleCount)}%)" else "Last-200 statistics: unavailable until confirmed results are captured"
         val last=p.getString("last_status","No OCR data yet") ?: "No OCR data yet"
-        dashboard.text="Capture frames: $frames\nOCR scans: $scans\nSnapshots retained: ${snapshots.length()} / 1000\nRound records retained: $winners / 500\nMy selected side: $side\nMy stake: ${if(stake.isBlank()) "not set" else stake}\nMy odds: ${if(myOdds.isBlank()) "not set" else "1:$myOdds"}\n$coverage\n$stats\nP/L: ${if(pnlCount>0) String.format(Locale.US,"%.2f (from $pnlCount fully calculated rounds)",pnl) else "not calculated — confirmed winner + my side/stake + readable odds required"}\n\nLATEST OCR DASHBOARD\n$last\n\nNote: OCR-visible history percentages are shown only when validated. No prediction or guaranteed win claim."
+        dashboard.text="Capture frames: $frames\nOCR scans: $scans\nSnapshots retained: ${snapshots.length()} / 1000\nRound records retained: $winners / 500\nMy selected side: $side\nMy stake: ${if(stake.isBlank()) "not set" else stake}\nMy odds: ${if(myOdds.isBlank()) "not set" else "1:$myOdds"}\n$coverage\n$stats\nCalculated wins: $wins • losses: $losses\nTotal personal stake (calculated rounds): ${String.format(Locale.US,"%.2f",totalStake)}\nGross profit: ${String.format(Locale.US,"%.2f",grossProfit)} • Gross loss: ${String.format(Locale.US,"%.2f",grossLoss)}\nNet P/L: ${if(pnlCount>0) String.format(Locale.US,"%.2f (from $pnlCount fully calculated rounds)",pnl) else "not calculated — confirmed winner + my side/stake + readable odds required"}\n\nLATEST OCR DASHBOARD\n$last\n\nNote: OCR-visible history percentages are shown only when validated. No prediction or guaranteed win claim."
         val fmt=SimpleDateFormat("yyyy-MM-dd HH:mm:ss",Locale.getDefault())
         val out=StringBuilder("ROUND HISTORY (newest first)\n")
         for(i in rounds.length()-1 downTo 0){
@@ -110,7 +116,10 @@ class MainActivity : Activity() {
             out.append(fmt.format(Date(r.optLong("time")))).append(" • ").append(r.optString("winner"))
             out.append(" • my bet ").append(r.optString("mySide","NONE")).append(" • stake ").append(r.optString("myStake","not set"))
             if(r.optString("myOdds").isNotBlank()) out.append(" • odds 1:").append(r.optString("myOdds"))
-            if(!r.isNull("pnl"))out.append(" • P/L ").append(r.optDouble("pnl"))
+            out.append(" • cards A/B ").append(if(r.isNull("andarCards")) "?" else r.optString("andarCards"))
+                .append("/").append(if(r.isNull("baharCards")) "?" else r.optString("baharCards")))
+            out.append(" • panel A/B ").append(r.optString("andarPanelTotal","?")).append("/").append(r.optString("baharPanelTotal","?"))
+            if(!r.isNull("pnl"))out.append(" • Net P/L ").append(r.optDouble("pnl"))
             else out.append(" • P/L unavailable")
             out.append("\n")
         }
