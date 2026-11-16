@@ -87,14 +87,12 @@ class CaptureService : Service() {
             recognizer.process(input).addOnSuccessListener { result ->
                 scans++
                 val lines = mutableListOf<String>()
+                val positionedLines = mutableListOf<com.google.mlkit.vision.text.Text.Line>()
                 for (block in result.textBlocks) for (line in block.lines) {
-                    val b = line.boundingBox
-                    val y = if (b != null && bitmap!!.height > 0) (b.centerY().toFloat() / bitmap!!.height) else -1f
                     lines.add(line.text.trim())
-                    // Keep normalized line geometry for diagnostics and future layout calibration.
-                    if (y >= 0f) Unit
+                    positionedLines.add(line)
                 }
-                analyze(result, lines)
+                analyze(result, lines, positionedLines, bitmap!!)
             }.addOnFailureListener { err ->
                 saveStatus("OCR error: ${err.javaClass.simpleName}: ${err.message}")
             }.addOnCompleteListener {
@@ -109,7 +107,12 @@ class CaptureService : Service() {
         }
     }
 
-    private fun analyze(result: Text, lines: List<String>) {
+    private fun analyze(
+        result: Text,
+        lines: List<String>,
+        positionedLines: List<com.google.mlkit.vision.text.Text.Line>,
+        frame: android.graphics.Bitmap
+    ) {
         val raw = lines.joinToString(" | ").take(4000)
         val normalized = raw.uppercase().replace(Regex("\\s+"), " ")
         // OCR sometimes reads BAHAR as BOHAR. Normalize this common visual confusion
@@ -200,13 +203,27 @@ class CaptureService : Service() {
             .firstOrNull { it != "NOT DETECTED" } ?: "NOT DETECTED"
         val cardsValue = dealt.toIntOrNull()
         if (cardsValue != null && cardsValue in 1..52) lastCardsDealt = cardsValue
+        val visualCards = ScreenCardAnalyzer.analyze(frame, positionedLines)
+        val previousAndarTotal = prefs.getString("last_andar_panel_total", "") ?: ""
+        val previousBaharTotal = prefs.getString("last_bahar_panel_total", "") ?: ""
+        fun delta(previous: String, current: String): String {
+            val p = previous.toDoubleOrNull() ?: return "not available"
+            val c = current.toDoubleOrNull() ?: return "not available"
+            return formatNum(c - p)
+        }
+        val andarDelta = delta(previousAndarTotal, andarTotal)
+        val baharDelta = delta(previousBaharTotal, baharTotal)
+        val moneyEditor = prefs.edit()
+        if (andarTotal != "not detected") moneyEditor.putString("last_andar_panel_total", andarTotal)
+        if (baharTotal != "not detected") moneyEditor.putString("last_bahar_panel_total", baharTotal)
+        moneyEditor.apply()
         if (stage != "NOT DETECTED") lastStage = stage
         updateRoundState(stage, winner, raw)
         val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
-        val snapshot = "STAGE: $stage\nROUND PHASE: $roundPhase\nROUND ID: $roundId\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
+        val snapshot = "STAGE: $stage\nROUND PHASE: $roundPhase\nROUND ID: $roundId\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nANDAR TOTAL CHANGE: $andarDelta\nBAHAR TOTAL CHANGE: $baharDelta\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT (OCR): $dealt\nANDAR CARDS (VISUAL): ${visualCards.andar?.toString() ?: "UNCERTAIN"}\nBAHAR CARDS (VISUAL): ${visualCards.bahar?.toString() ?: "UNCERTAIN"}\nTOTAL CARD REGIONS (VISUAL): ${visualCards.total?.toString() ?: "UNCERTAIN"}\nCARD DETECTION: ${visualCards.confidence}\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
         if (snapshot != lastText) { lastText = snapshot; saveSnapshot(snapshot) }
         prefs.edit().putInt("scan_count", scans).putInt("frames_received", frames).putString("last_status", snapshot).putString("last_text", snapshot).apply()
-        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage • round $roundId\nAndar total: $andarTotal • Bahar total: $baharTotal\nOdds: 1:$oddsA / 1:$oddsB\nCards dealt: $dealt\nWinner: $winner" }
+        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage • round $roundId\nAndar money: $andarTotal (Δ $andarDelta) • Bahar money: $baharTotal (Δ $baharDelta)\nCards dealt: $dealt\nAndar cards: ${visualCards.andar?.toString() ?: "?"} • Bahar cards: ${visualCards.bahar?.toString() ?: "?"}\nCard scan: ${visualCards.confidence}\nWinner: $winner" }
     }
 
     private fun updateRoundState(stage: String, winner: String, raw: String) {
