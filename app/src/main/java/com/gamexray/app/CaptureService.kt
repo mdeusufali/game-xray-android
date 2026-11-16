@@ -204,6 +204,7 @@ class CaptureService : Service() {
         val cardsValue = dealt.toIntOrNull()
         if (cardsValue != null && cardsValue in 1..52) lastCardsDealt = cardsValue
         val visualCards = ScreenCardAnalyzer.analyze(frame, positionedLines)
+        val visualWinner = ScreenCardAnalyzer.winnerHighlightCandidate(frame, positionedLines)
         val previousAndarTotal = prefs.getString("last_andar_panel_total", "") ?: ""
         val previousBaharTotal = prefs.getString("last_bahar_panel_total", "") ?: ""
         fun delta(previous: String, current: String): String {
@@ -220,10 +221,10 @@ class CaptureService : Service() {
         if (stage != "NOT DETECTED") lastStage = stage
         updateRoundState(stage, winner, raw, visualCards, andarTotal, baharTotal, dealt)
         val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
-        val snapshot = "STAGE: $stage\nROUND PHASE: $roundPhase\nROUND ID: $roundId\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nANDAR TOTAL CHANGE: $andarDelta\nBAHAR TOTAL CHANGE: $baharDelta\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT (OCR): $dealt\nANDAR CARDS (VISUAL): ${visualCards.andar?.toString() ?: "UNCERTAIN"}\nBAHAR CARDS (VISUAL): ${visualCards.bahar?.toString() ?: "UNCERTAIN"}\nTOTAL CARD REGIONS (VISUAL): ${visualCards.total?.toString() ?: "UNCERTAIN"}\nCARD DETECTION: ${visualCards.confidence}\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
+        val snapshot = "STAGE: $stage\nROUND PHASE: $roundPhase\nROUND ID: $roundId\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nANDAR TOTAL CHANGE: $andarDelta\nBAHAR TOTAL CHANGE: $baharDelta\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT (OCR): $dealt\nANDAR CARDS (VISUAL): ${visualCards.andar?.toString() ?: "UNCERTAIN"}\nBAHAR CARDS (VISUAL): ${visualCards.bahar?.toString() ?: "UNCERTAIN"}\nTOTAL CARD REGIONS (VISUAL): ${visualCards.total?.toString() ?: "UNCERTAIN"}\nCARD DETECTION: ${visualCards.confidence}\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nVISUAL WINNER SIGNAL: ${visualWinner.candidate} — ${visualWinner.detail}\nOCR RAW: $raw"
         if (snapshot != lastText) { lastText = snapshot; saveSnapshot(snapshot) }
         prefs.edit().putInt("scan_count", scans).putInt("frames_received", frames).putString("last_status", snapshot).putString("last_text", snapshot).apply()
-        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage • round $roundId\nAndar money: $andarTotal (Δ $andarDelta) • Bahar money: $baharTotal (Δ $baharDelta)\nCards dealt: $dealt\nAndar cards: ${visualCards.andar?.toString() ?: "?"} • Bahar cards: ${visualCards.bahar?.toString() ?: "?"}\nCard scan: ${visualCards.confidence}\nWinner: $winner" }
+        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage • round $roundId\nAndar money: $andarTotal (Δ $andarDelta) • Bahar money: $baharTotal (Δ $baharDelta)\nCards dealt: $dealt\nAndar cards: ${visualCards.andar?.toString() ?: "?"} • Bahar cards: ${visualCards.bahar?.toString() ?: "?"}\nCard scan: ${visualCards.confidence}\nWinner: $winner / ${visualWinner.candidate}" }
     }
 
     private fun updateRoundState(
