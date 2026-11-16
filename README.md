@@ -18,15 +18,23 @@ Game X-Ray is a local Android screen-capture and OCR dashboard for the visible A
 13. Android overlay and MediaProjection permission flow, foreground capture service, and GitHub Actions APK build/verification workflow.
 
 ## Important limitations
-- OCR is not a guaranteed card/rank/suit detector. The app only reads text visible on the screen.
-- Panel totals and side odds depend on the game's exact visible labels and OCR quality; ambiguous values remain unavailable rather than guessed.
-- A winner is recorded only when the screen contains an explicit result phrase on the same OCR line as ANDAR or BAHAR. If the game uses a visual-only result, it will not be recorded.
+- Visual card-region counting is a conservative image heuristic over bright, portrait-shaped regions, assigned to the nearest OCR Andar/Bahar text anchor. It reports VISUAL_CANDIDATE only; it is not yet calibrated against a supplied real-game screenshot, can miss overlapping/colored cards, and may misclassify bright UI elements. Treat uncertain results as unavailable.
+- The visual winner feature compares local brightness around the OCR Andar/Bahar label anchors and reports only a VISUAL_WINNER_CANDIDATE. It does not confirm a winner or save financial results from highlight alone. Real-game before/after screenshots and temporal validation are still required.
+- Panel totals and side odds depend on the game's exact visible labels and OCR quality; ambiguous values remain unavailable rather than guessed. Money deltas are only available after a reliable labeled total has been recognized in consecutive frames.
+- A winner is recorded only when the screen contains an explicit result phrase on the same OCR line as ANDAR or BAHAR. Visual-only results remain candidates and are not treated as confirmed.
 - The 200-round statistics are calculated from confirmed, saved OCR results. They are not a prediction of future outcomes.
 - P/L uses the personal side, stake and odds that the user manually enters. It is not financial advice and cannot predict or guarantee a win.
 - All OCR text and history are stored locally on the device; this app has no network/API/WebSocket feature.
 
 ## Build
 Push to `main` or manually run the GitHub Actions workflow. It runs `gradle clean assembleDebug`, verifies the APK signature and package metadata, and uploads the debug APK as the `Game-X-Ray-debug-v0.2.0` artifact.
+
+## Recent implementation notes
+- The capture pipeline now retains ML Kit line bounding boxes and passes the captured bitmap to an on-device visual analyzer.
+- The dashboard snapshot includes separate Andar/Bahar visual card-region candidate counts, OCR cards-dealt count, labeled panel totals and observed total changes.
+- Confirmed round history stores the available card-region observations and panel totals with each explicit OCR winner.
+- The dashboard summarizes calculated personal wins/losses, stake, gross profit/loss and net P/L.
+- No tests or build commands were run as requested. Visual card-area and highlight heuristics require validation against real game screenshots before they can be considered reliable.
 
 ## Use
 1. Install the APK.
