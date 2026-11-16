@@ -1,8 +1,14 @@
 package com.gamexray.app
 
-import android.app.*
+import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -14,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -21,15 +28,26 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.gamexray.app.core.Accounting
+import com.gamexray.app.core.BettingStage
+import com.gamexray.app.core.CardShapeDetector
+import com.gamexray.app.core.CardZoneLocator
+import com.gamexray.app.core.FrameAnalysis
+import com.gamexray.app.core.FrameEngine
+import com.gamexray.app.core.ManagedRound
+import com.gamexray.app.core.RoundStage
+import com.gamexray.app.core.Side
+import com.gamexray.app.core.VisualRegionAnalyzer
+import com.gamexray.app.core.WinnerState
+import com.gamexray.app.data.GameXRayStore
+import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import org.json.JSONArray
-import org.json.JSONObject
-import java.nio.ByteBuffer
+import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 
 class CaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -40,256 +58,472 @@ class CaptureService : Service() {
     private var status: TextView? = null
     private var scans = 0
     private var frames = 0
-    private var lastText = ""
-    private var roundPhase = "IDLE"
-    private var roundId = 0L
-    private var lastCardsDealt = -1
-    private var lastStage = "NOT DETECTED"
+    private var lastProcessAt = 0L
+    private var lastPersistedHash = ""
+    private var lastPersistAt = 0L
+    private var lastLoggedKey = ""
+    private var scanIntervalMs = 900L
+    private var stopping = false
     private val busy = AtomicBoolean(false)
-    private val prefs by lazy { getSharedPreferences("game_xray_local", Context.MODE_PRIVATE) }
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private lateinit var store: GameXRayStore
+    private lateinit var engine: FrameEngine
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
+    override fun onCreate() {
+        super.onCreate()
+        store = GameXRayStore(this)
+        engine = FrameEngine()
+        val active = store.loadActive()
+        if (active != null) {
+            engine.restore(active, store.loadCardState())
+        }
+        scans = store.counts().first
+        frames = store.counts().second
+        lastPersistedHash = store.lastSnapshotHash()
+        lastPersistAt = store.lastSnapshotTime()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("gx", "Game X-Ray capture", NotificationManager.IMPORTANCE_LOW))
-        val notification = Notification.Builder(this, "gx")
-        startForeground(7, notification.setContentTitle("Game X-Ray is capturing").setContentText("Local screen OCR active").setSmallIcon(android.R.drawable.ic_menu_view).build())
+        createNotificationChannel()
+        val notification = Notification.Builder(this, CHANNEL)
+            .setContentTitle("Game X-Ray is capturing")
+            .setContentText("Local screen OCR and card tracking active")
+            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .build()
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        if (projection != null) return START_NOT_STICKY
         val code = intent?.getIntExtra("resultCode", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
-        @Suppress("DEPRECATION") val data = intent?.getParcelableExtra<Intent>("resultData")
-        if (code == Activity.RESULT_OK && data != null) beginCapture(code, data)
+        @Suppress("DEPRECATION")
+        val data = intent?.getParcelableExtra<Intent>("resultData")
+        if (code == Activity.RESULT_OK && data != null) {
+            beginCapture(code, data)
+        } else {
+            store.appendStatus("Capture permission was not granted; service stopped.")
+            stopSelf()
+        }
         return START_NOT_STICKY
     }
 
     private fun beginCapture(code: Int, data: Intent) {
-        scans = prefs.getInt("scan_count", 0); frames = prefs.getInt("frames_received", 0)
-        roundPhase = prefs.getString("round_phase", "IDLE") ?: "IDLE"
-        roundId = prefs.getLong("active_round_id", 0L)
-        val m = resources.displayMetrics
-        val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = mgr.getMediaProjection(code, data)
-        projection?.registerCallback(object : MediaProjection.Callback() { override fun onStop() { stopSelf() } }, Handler(Looper.getMainLooper()))
-        reader = ImageReader.newInstance(m.widthPixels, m.heightPixels, PixelFormat.RGBA_8888, 3)
-        showFloatingPanel()
-        reader?.setOnImageAvailableListener({ src ->
-            val img = try { src.acquireLatestImage() } catch (_: Exception) { null }
-            if (img != null) { if (busy.compareAndSet(false, true)) process(img) else { img.close() } }
-        }, Handler(Looper.getMainLooper()))
-        display = projection?.createVirtualDisplay("GameXRay", m.widthPixels, m.heightPixels, m.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader?.surface, null, Handler(Looper.getMainLooper()))
-        status?.text = if (display == null) "ERROR: capture display did not start" else "Capture ready. Waiting for game screen…"
-    }
-
-    private fun process(image: Image) {
-        var bitmap: android.graphics.Bitmap? = null
         try {
-            frames++
-            bitmap = imageToBitmap(image); image.close()
-            val input = InputImage.fromBitmap(bitmap, 0)
-            recognizer.process(input).addOnSuccessListener { result ->
-                scans++
-                val lines = mutableListOf<String>()
-                for (block in result.textBlocks) for (line in block.lines) {
-                    val b = line.boundingBox
-                    val y = if (b != null && bitmap!!.height > 0) (b.centerY().toFloat() / bitmap!!.height) else -1f
-                    lines.add(line.text.trim())
-                    // Keep normalized line geometry for diagnostics and future layout calibration.
-                    if (y >= 0f) Unit
+            val metrics = resources.displayMetrics
+            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            projection = manager.getMediaProjection(code, data)
+            projection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    if (!stopping) stopSelf()
                 }
-                analyze(result, lines)
-            }.addOnFailureListener { err ->
-                saveStatus("OCR error: ${err.javaClass.simpleName}: ${err.message}")
-            }.addOnCompleteListener {
-                bitmap?.recycle()
-                busy.set(false)
+            }, mainHandler)
+
+            reader = ImageReader.newInstance(metrics.widthPixels, metrics.heightPixels, PixelFormat.RGBA_8888, 3)
+            showFloatingPanel()
+            reader?.setOnImageAvailableListener({ source ->
+                val image = try {
+                    source.acquireLatestImage()
+                } catch (_: Exception) {
+                    null
+                } ?: return@setOnImageAvailableListener
+                frames++
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastProcessAt < scanIntervalMs) {
+                    image.close()
+                    return@setOnImageAvailableListener
+                }
+                if (!busy.compareAndSet(false, true)) {
+                    image.close()
+                    return@setOnImageAvailableListener
+                }
+                lastProcessAt = now
+                executor.execute { processImage(image) }
+            }, mainHandler)
+
+            display = projection?.createVirtualDisplay(
+                "GameXRay",
+                metrics.widthPixels,
+                metrics.heightPixels,
+                metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader?.surface,
+                null,
+                mainHandler
+            )
+            if (display == null) {
+                store.appendStatus("ERROR: capture display did not start")
+                updateOverlay("ERROR: capture display did not start")
+                stopSelf()
+            } else {
+                updateOverlay("Capture ready. Waiting for the game screen…")
             }
         } catch (e: Exception) {
-            try { image.close() } catch (_: Exception) {}
-            bitmap?.recycle()
-            saveStatus("Capture error: ${e.javaClass.simpleName}: ${e.message}")
+            store.appendStatus("Capture start error: ${e.javaClass.simpleName}: ${e.message}")
+            updateOverlay("Capture start error: ${e.message}")
+            stopSelf()
+        }
+    }
+
+    private fun processImage(image: Image) {
+        val bitmaps = mutableListOf<Bitmap>()
+        var imageClosed = false
+        try {
+            val base = imageToBitmap(image)
+            image.close()
+            imageClosed = true
+            bitmaps.add(base)
+            val timestamp = System.currentTimeMillis()
+
+            val ocrBitmap = scaleFor(base, 1000, bitmaps)
+            val text = try {
+                Tasks.await(
+                    recognizer.process(InputImage.fromBitmap(ocrBitmap, 0)),
+                    25,
+                    TimeUnit.SECONDS
+                )
+            } catch (e: Exception) {
+                if (!stopping && !isCancellation(e)) {
+                    store.appendStatus("OCR error: ${e.javaClass.simpleName}: ${e.message}")
+                }
+                return
+            }
+            scans++
+            val ocrFrame = AndroidVision.ocrFrame(text, ocrBitmap.width, ocrBitmap.height, timestamp)
+
+            val cvBitmap = scaleFor(base, 480, bitmaps)
+            val cvFrame = AndroidVision.imageFrame(cvBitmap)
+            val parsed = engine.parser.parse(ocrFrame)
+            val manualZones = store.manualCardZones()
+            val zones = CardZoneLocator.locate(parsed, manualZones)
+            val candidates = CardShapeDetector.detect(cvFrame, zones)
+            val visualStats = VisualRegionAnalyzer.analyze(cvFrame, zones)
+            val settings = store.settings()
+            val analysis = engine.process(ocrFrame, candidates, visualStats, settings, manualZones)
+
+            persist(analysis)
+        } catch (e: Exception) {
+            if (!stopping && !isCancellation(e)) {
+                store.appendStatus("Capture error: ${e.javaClass.simpleName}: ${e.message}")
+                updateOverlay("Capture error: ${e.message}")
+            }
+        } finally {
+            if (!imageClosed) {
+                try {
+                    image.close()
+                } catch (_: Exception) {
+                    // already closed
+                }
+            }
+            for (bitmap in bitmaps.distinct()) {
+                if (!bitmap.isRecycled) bitmap.recycle()
+            }
+            store.setCounters(scans, frames)
             busy.set(false)
         }
     }
 
-    private fun analyze(result: Text, lines: List<String>) {
-        val raw = lines.joinToString(" | ").take(4000)
-        val normalized = raw.uppercase().replace(Regex("\\s+"), " ")
-        // OCR sometimes reads BAHAR as BOHAR. Normalize this common visual confusion
-        // for parsing while preserving the original raw OCR text in diagnostics.
-        val canonicalLines = lines.map { it.replace(Regex("(?i)\\bBOHAR\\b"), "BAHAR") }
-        // BET LOCKED takes precedence when both labels appear in one OCR frame.
-        val stage = when {
-            Regex("\\bBET\\s+LOCKED\\b").containsMatchIn(normalized) -> "BET LOCKED"
-            Regex("\\bPLACE\\s+BET\\b").containsMatchIn(normalized) -> "PLACE BET"
-            else -> "NOT DETECTED"
+    private fun scaleFor(base: Bitmap, maxWidth: Int, sink: MutableList<Bitmap>): Bitmap {
+        val (scaled, created) = AndroidVision.scaled(base, maxWidth)
+        if (created) sink.add(scaled)
+        return scaled
+    }
+
+    private fun persist(analysis: FrameAnalysis) {
+        store.setCounters(scans, frames)
+        val overlayText = buildOverlayText(analysis)
+        val round = analysis.round
+        if (round != null) {
+            store.saveActive(round)
+            scanIntervalMs = if (round.stage == RoundStage.BETTING_LOCKED ||
+                round.stage == RoundStage.CARDS_DEALT ||
+                round.stage == RoundStage.RESULT_DETECTED ||
+                round.stage == RoundStage.WINNER_CONFIRMED
+            ) 650L else 900L
         }
-        // Never treat a bare percentage or an odds ratio as a panel money total.
-        fun panelTotal(side: String): String {
-            val patterns = listOf(
-                Regex("(?i)\\b(?:TOTAL|AMOUNT|BET\\s*AMOUNT)\\s+" + side + "\\b\\s*[:=-]?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)"),
-                Regex("(?i)\\b" + side + "\\s+(?:TOTAL|AMOUNT|BET\\s*AMOUNT)\\b\\s*[:=-]?\\s*([0-9][0-9,]*(?:\\.[0-9]{1,2})?)")
+        store.saveCardState(analysis.cards)
+
+        val completed = analysis.roundUpdate.completed
+        if (completed != null) {
+            val saved = store.appendRound(completed)
+            if (saved) {
+                store.appendStatus(
+                    "Round ${completed.id} completed: winner ${completed.winner.label}, " +
+                        "My ${completed.mySide.label} stake=${completed.myStake ?: "n/a"}, " +
+                        "net=${completed.netProfit?.let { formatMoney(it) } ?: "unavailable"}"
+                )
+                lastLoggedKey = ""
+            }
+        }
+
+        // Rounds closed on a genuine new-round boundary without a financial result are still
+        // kept once in history, clearly marked unsettled (candidate/conflict preserved).
+        for (record in analysis.roundUpdate.finalizedRecords) {
+            val saved = store.appendRound(record)
+            if (saved) {
+                store.appendStatus(
+                    "Round ${record.id} closed unsettled: ${record.detectionStatus} " +
+                        "(winner=${record.winnerState}:${record.winner.label})"
+                )
+                lastLoggedKey = ""
+            }
+        }
+
+        val shouldPersist = analysis.snapshotHash != lastPersistedHash ||
+            analysis.ocr.timestamp - lastPersistAt >= 5000L
+        store.saveAnalysis(analysis, overlayText, shouldPersist)
+        if (shouldPersist) {
+            lastPersistedHash = analysis.snapshotHash
+            lastPersistAt = analysis.ocr.timestamp
+        }
+
+        val logKey = buildString {
+            append(analysis.parsed.bettingStage).append('|')
+            append(round?.id).append('|').append(round?.stage).append('|')
+            append(round?.andarCards).append('|').append(round?.baharCards).append('|')
+            append(round?.andarMoney?.current).append('|').append(round?.baharMoney?.current).append('|')
+            append(analysis.winner.state).append('|').append(analysis.winner.side)
+        }
+        if (logKey != lastLoggedKey) {
+            lastLoggedKey = logKey
+            val stage = round?.stage?.name ?: "IDLE"
+            store.appendStatus(
+                "Stage=$stage betting=${analysis.parsed.bettingStage} round=${round?.id ?: 0} " +
+                    "cards A=${round?.andarCards ?: 0} B=${round?.baharCards ?: 0} " +
+                    "winner=${analysis.winner.state}:${analysis.winner.side.label}"
             )
-            for (line in lines) {
-                if (line.contains("%") || Regex("1\\s*[:/]\\s*[0-9]").containsMatchIn(line)) continue
-                for (pattern in patterns) {
-                    val value = pattern.find(line)?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
-                    if (value != null && value in 0.01..100000000.0) return formatNum(value)
-                }
-            }
-            return "not detected"
         }
-        fun oddsFor(side: String): String {
-            val pattern = Regex("(?i)1\\s*[:/]\\s*([0-9]+(?:\\.[0-9]+)?)")
-            // Prefer a clean side-label line and inspect only its immediate OCR
-            // neighborhood. Do not search the distant betting-range odds list.
-            val candidates = canonicalLines.indices
-                .filter { i ->
-                    val u = canonicalLines[i].uppercase().trim()
-                    val cleanSide = Regex("^" + side + "[\\s.:!_-]*$").matches(u)
-                    val sameLineSide = Regex("\\b" + side + "\\b").containsMatchIn(u) &&
-                        !u.contains("BIGGEST") && !u.contains("HISTORY") && !u.contains("LAST")
-                    cleanSide || sameLineSide
-                }
-            for (sideIndex in candidates) {
-                val nearby = listOf(sideIndex, sideIndex + 1, sideIndex - 1)
-                    .filter { it in canonicalLines.indices }
-                for (index in nearby) {
-                    val upper = canonicalLines[index].uppercase()
-                    if (upper.contains("RANGE") || upper.contains("HISTORY") ||
-                        upper.contains("BIGGEST") || upper.contains("LAST") ||
-                        (upper.contains("ANDAR") && upper.contains("BAHAR"))) continue
-                    val value = pattern.find(canonicalLines[index])?.groupValues?.getOrNull(1)?.toDoubleOrNull()
-                    if (value != null && value in 1.01..1000.0) return formatNum(value)
-                }
-            }
-            return "not detected"
-        }
-        val andarPanel = canonicalLines.filter { it.contains("ANDAR", true) }.joinToString(" / ").take(400)
-        val baharPanel = canonicalLines.filter { it.contains("BAHAR", true) }.joinToString(" / ").take(400)
-        val andarTotal = panelTotal("ANDAR")
-        val baharTotal = panelTotal("BAHAR")
-        val oddsA = oddsFor("ANDAR")
-        val oddsB = oddsFor("BAHAR")
-        val dealtIndex = lines.indexOfFirst { it.contains("CARDS", true) && it.contains("DEALT", true) }
-        val dealtInline = if (dealtIndex >= 0) Regex("(?i)CARDS\\s+DEALT\\s*[:#-]?\\s*(\\d{1,2})").find(lines[dealtIndex])?.groupValues?.get(1) else null
-        // Some layouts put the card count on the line immediately below the label.
-        // Only accept an adjacent standalone 1..52 value; never search unrelated screen numbers.
-        val dealtNext = if (dealtIndex >= 0 && dealtIndex + 1 < lines.size) {
-            Regex("^\\d{1,2}$").matchEntire(lines[dealtIndex + 1].trim())?.value
-        } else null
-        val dealt = (dealtInline ?: dealtNext)?.toIntOrNull()?.takeIf { it in 1..52 }?.toString() ?: "not detected"
-        val stakeLine = lines.firstOrNull { it.contains("TOTAL STAKE", true) } ?: ""
-        val visibleStakeLabel = if (stakeLine.isNotBlank()) "visible label only; not assumed to be personal stake" else "not detected"
-        val histLine = lines.filter { it.contains("%") || it.contains("HISTORY", true) || it.contains("LAST", true) }.joinToString(" | ").take(600)
-        val percentages = Regex("(?i)ANDAR\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%.*?BAHAR\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*%").find(histLine)
-        val pA = percentages?.groupValues?.get(1)?.toDoubleOrNull()
-        val pB = percentages?.groupValues?.get(2)?.toDoubleOrNull()
-        val pct = if (pA != null && pB != null && pA in 0.0..100.0 && pB in 0.0..100.0 && abs(pA+pB-100.0)<=2.0) "Andar ${formatNum(pA)}% / Bahar ${formatNum(pB)}%" else "not reliably detected"
-        // Require result wording on the same OCR line as the side; ignore promotional winner labels.
-        fun explicitWinnerOnLine(line: String): String {
-            val u = line.replace(Regex("(?i)\\bBOHAR\\b"), "BAHAR").uppercase()
-            if (u.contains("BIGGEST WINNER") || u.contains("TOP WINNER")) return "NOT DETECTED"
-            if (!Regex("\\b(WINS|WON|WINNER|RESULT)\\b").containsMatchIn(u)) return "NOT DETECTED"
-            val hasA = Regex("\\bANDAR\\b").containsMatchIn(u)
-            val hasB = Regex("\\bBAHAR\\b").containsMatchIn(u)
-            return when {
-                hasA && !hasB -> "ANDAR"
-                hasB && !hasA -> "BAHAR"
-                else -> "NOT DETECTED"
-            }
-        }
-        val winner = lines.asSequence().map { explicitWinnerOnLine(it) }
-            .firstOrNull { it != "NOT DETECTED" } ?: "NOT DETECTED"
-        val cardsValue = dealt.toIntOrNull()
-        if (cardsValue != null && cardsValue in 1..52) lastCardsDealt = cardsValue
-        if (stage != "NOT DETECTED") lastStage = stage
-        updateRoundState(stage, winner, raw)
-        val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
-        val snapshot = "STAGE: $stage\nROUND PHASE: $roundPhase\nROUND ID: $roundId\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT: $dealt\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
-        if (snapshot != lastText) { lastText = snapshot; saveSnapshot(snapshot) }
-        prefs.edit().putInt("scan_count", scans).putInt("frames_received", frames).putString("last_status", snapshot).putString("last_text", snapshot).apply()
-        status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage • round $roundId\nAndar total: $andarTotal • Bahar total: $baharTotal\nOdds: 1:$oddsA / 1:$oddsB\nCards dealt: $dealt\nWinner: $winner" }
+        updateOverlay(overlayText)
     }
 
-    private fun updateRoundState(stage: String, winner: String, raw: String) {
-        // PLACE BET after LOCKED is the next round boundary. If no explicit
-        // winner was seen, leave the previous round unrecorded rather than guessing.
-        // Repeated PLACE BET frames during BETTING keep the same round ID.
-        if (stage == "PLACE BET" && winner == "NOT DETECTED" && roundPhase in listOf("IDLE", "RESULT", "LOCKED")) {
-            roundPhase = "BETTING"
-            roundId = System.currentTimeMillis()
-            prefs.edit()
-                .putString("round_phase", roundPhase)
-                .putLong("active_round_id", roundId)
-                .putString("round_my_side", prefs.getString("my_side", "NONE") ?: "NONE")
-                .putString("round_my_stake", prefs.getString("my_stake", "") ?: "")
-                .putString("round_my_odds", prefs.getString("my_odds", "") ?: "")
-                .apply()
+    private fun buildOverlayText(analysis: FrameAnalysis): String {
+        val round = analysis.round
+        val winner = analysis.winner
+        val settlement = round?.let {
+            Accounting.settle(
+                side = it.bet?.side ?: Side.UNKNOWN,
+                stake = it.bet?.stake,
+                odds = it.bet?.odds,
+                winner = it.winnerSide.takeIf { side -> side != Side.UNKNOWN },
+                winnerState = it.winnerState
+            )
         }
-        if (stage == "BET LOCKED" && roundPhase == "BETTING") {
-            roundPhase = "LOCKED"
-            prefs.edit().putString("round_phase", roundPhase).apply()
-        }
-        // Save at most once, and only after BET LOCKED for the active round.
-        if (winner != "NOT DETECTED" && roundPhase == "LOCKED" && roundId > 0L) {
-            if (prefs.getLong("last_saved_round_id", 0L) == roundId) return
-            val rounds = readArray("rounds")
-            // Use the settings frozen when this round began. Later edits must not
-            // rewrite the stake, side, or odds belonging to an earlier round.
-            val personalStake = prefs.getString("round_my_stake", prefs.getString("my_stake", "") ?: "") ?: ""
-            val side = prefs.getString("round_my_side", prefs.getString("my_side", "NONE") ?: "NONE") ?: "NONE"
-            // P/L uses the user's explicitly entered odds, never public panel/range odds.
-            val personalOdds = prefs.getString("round_my_odds", prefs.getString("my_odds", "") ?: "") ?: ""
-            val stake = personalStake.toDoubleOrNull()
-            val odds = personalOdds.toDoubleOrNull()
-            val pnl = if (stake != null && stake > 0 && side in listOf("ANDAR", "BAHAR") && odds != null && odds >= 1.0) {
-                if (side == winner) stake * (odds - 1.0) else -stake
-            } else null
-            rounds.put(JSONObject().put("id", roundId).put("time", System.currentTimeMillis())
-                .put("winner", winner).put("source", "explicit same-line OCR result")
-                .put("mySide", side).put("myStake", personalStake).put("myOdds", personalOdds).put("pnl", pnl ?: JSONObject.NULL))
-            val keep = JSONArray()
-            for (i in (rounds.length() - 499).coerceAtLeast(0) until rounds.length()) keep.put(rounds.getJSONObject(i))
-            prefs.edit().putString("rounds", keep.toString()).putInt("round_count", keep.length())
-                .putLong("last_saved_round_id", roundId).putString("round_phase", "RESULT").apply()
-            roundPhase = "RESULT"
+        fun money(value: Double?): String =
+            if (value == null) "NOT DETECTED" else formatMoney(value)
+
+        return buildString {
+            append("Round ").append(round?.id ?: 0).append(" • ").append(round?.stage?.name ?: "IDLE").append('\n')
+            append("Cards A=").append(round?.andarCards ?: 0)
+                .append(" B=").append(round?.baharCards ?: 0)
+                .append(" total=").append(round?.totalCards ?: 0)
+                .append(" | OCR dealt=").append(round?.cardsDealtOcr ?: "NOT DETECTED").append('\n')
+            append("Andar ").append(money(round?.andarMoney?.current))
+                .append(if (round?.andarMoney?.status == com.gamexray.app.core.DetectionStatus.DETECTED) "" else " (${round?.andarMoney?.status?.label ?: "NOT DETECTED"})")
+                .append(" • Bahar ").append(money(round?.baharMoney?.current)).append('\n')
+            append("Odds A ").append(round?.andarOdds?.let { "1:$it" } ?: "NOT DETECTED")
+                .append(" • B ").append(round?.baharOdds?.let { "1:$it" } ?: "NOT DETECTED").append('\n')
+            append("My ").append(round?.bet?.side?.label ?: "NOT SET")
+                .append(" stake ").append(round?.bet?.stake?.let { formatMoney(it) } ?: "not set")
+                .append(" odds ").append(round?.bet?.odds?.let { "1:$it" } ?: "not set").append('\n')
+            append("Winner: ").append(winner.side.label)
+                .append(" (").append(winner.state.name).append(")\n")
+            if (settlement?.calculated == true) {
+                append(if (settlement.isWin == true) "WIN" else "LOSS")
+                    .append(" net ").append(formatSigned(settlement.netProfit ?: 0.0))
+            } else {
+                append("P/L unavailable")
+            }
+            append("\nFrames ").append(frames).append(" • Scans ").append(scans)
         }
     }
 
-    private fun readArray(key: String) = try { JSONArray(prefs.getString(key, "[]")) } catch (_: Exception) { JSONArray() }
-    private fun saveSnapshot(text: String) {
-        val old = readArray("history"); val arr = JSONArray()
-        for (i in (old.length()-999).coerceAtLeast(0) until old.length()) arr.put(old.getJSONObject(i))
-        arr.put(JSONObject().put("time", System.currentTimeMillis()).put("text", text.take(4000)))
-        prefs.edit().putString("history", arr.toString()).putInt("history_count", arr.length()).apply()
+    private fun updateOverlay(text: String) {
+        status?.post {
+            status?.text = text
+        }
     }
-    private fun saveStatus(message: String) { prefs.edit().putString("last_status", message).apply(); status?.post { status?.text = message } }
-    private fun formatNum(v: Double) = if (v % 1.0 == 0.0) v.toLong().toString() else String.format(java.util.Locale.US, "%.2f", v)
-    private fun imageToBitmap(image: Image): android.graphics.Bitmap {
-        val p=image.planes[0]; val stride=p.rowStride; val pixel=p.pixelStride
-        val paddedWidth=image.width+(stride-pixel*image.width)/pixel
-        val padded=android.graphics.Bitmap.createBitmap(paddedWidth,image.height,android.graphics.Bitmap.Config.ARGB_8888)
-        padded.copyPixelsFromBuffer(p.buffer)
-        val cropped=android.graphics.Bitmap.createBitmap(padded,0,0,image.width,image.height); padded.recycle(); return cropped
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            val manager = getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(CHANNEL, "Game X-Ray capture", NotificationManager.IMPORTANCE_LOW)
+            channel.setShowBadge(false)
+            manager.createNotificationChannel(channel)
+        }
     }
 
     private fun showFloatingPanel() {
-        if (!Settings.canDrawOverlays(this)) { stopSelf(); return }
-        windowManager=getSystemService(WINDOW_SERVICE) as WindowManager
-        val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(12,10,12,10); setBackgroundColor(0xEE14212B.toInt()) }
-        box.addView(TextView(this).apply { text="GAME X-RAY • LIVE"; textSize=13f; setTextColor(0xFF55DDFF.toInt()) })
-        status=TextView(this).apply { text="Screen capture active"; textSize=11f; setTextColor(0xFFFFFFFF.toInt()); maxLines=10 }
-        box.addView(status); box.addView(Button(this).apply { text="STOP"; setOnClickListener { stopSelf() } })
-        val type=if(Build.VERSION.SDK_INT>=26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
-        val params=WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT,WindowManager.LayoutParams.WRAP_CONTENT,type,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE,PixelFormat.TRANSLUCENT).apply { gravity=Gravity.TOP or Gravity.END; x=12; y=120 }
-        box.setOnTouchListener(object: android.view.View.OnTouchListener {
-            var sx=0; var sy=0; var tx=0f; var ty=0f
-            override fun onTouch(v:android.view.View,e:MotionEvent):Boolean { when(e.action){ MotionEvent.ACTION_DOWN->{sx=params.x;sy=params.y;tx=e.rawX;ty=e.rawY;return true}; MotionEvent.ACTION_MOVE->{params.x=sx-(e.rawX-tx).toInt();params.y=sy+(e.rawY-ty).toInt();windowManager?.updateViewLayout(box,params);return true} };return false }
+        if (!Settings.canDrawOverlays(this)) {
+            store.appendStatus("Floating window permission missing; cannot show overlay.")
+            stopSelf()
+            return
+        }
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(14, 12, 14, 12)
+            setBackgroundColor(0xEE14212B.toInt())
+        }
+        box.addView(TextView(this).apply {
+            text = "GAME X-RAY • LIVE"
+            textSize = 13f
+            setTextColor(0xFF55DDFF.toInt())
         })
-        overlay=box; windowManager?.addView(box,params)
+        status = TextView(this).apply {
+            text = "Screen capture active"
+            textSize = 11f
+            setTextColor(0xFFFFFFFF.toInt())
+            maxLines = 18
+        }
+        box.addView(status)
+
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        buttons.addView(Button(this).apply {
+            text = "DASHBOARD"
+            textSize = 11f
+            setOnClickListener {
+                val intent = Intent(this@CaptureService, MainActivity::class.java)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                startActivity(intent)
+            }
+        })
+        buttons.addView(Button(this).apply {
+            text = "STOP"
+            textSize = 11f
+            setOnClickListener { stopSelf() }
+        })
+        box.addView(buttons)
+
+        val type = if (Build.VERSION.SDK_INT >= 26) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 12
+            y = 120
+        }
+        box.setOnTouchListener(object : android.view.View.OnTouchListener {
+            var startX = 0
+            var startY = 0
+            var touchX = 0f
+            var touchY = 0f
+            override fun onTouch(v: android.view.View, event: MotionEvent): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = params.x
+                        startY = params.y
+                        touchX = event.rawX
+                        touchY = event.rawY
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        params.x = startX - (event.rawX - touchX).toInt()
+                        params.y = startY + (event.rawY - touchY).toInt()
+                        windowManager?.updateViewLayout(box, params)
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+        overlay = box
+        windowManager?.addView(box, params)
     }
+
+    private fun imageToBitmap(image: Image): Bitmap {
+        val plane = image.planes[0]
+        val stride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val paddedWidth = image.width + (stride - pixelStride * image.width) / pixelStride
+        val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
+        padded.copyPixelsFromBuffer(plane.buffer)
+        if (paddedWidth == image.width) return padded
+        val cropped = Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
+        padded.recycle()
+        return cropped
+    }
+
+    private fun formatMoney(value: Double): String =
+        if (value % 1.0 == 0.0) value.toLong().toString()
+        else String.format(Locale.US, "%.2f", value)
+
+    /** ML Kit reports "Task is already canceled" while capture is being stopped on purpose. */
+    private fun isCancellation(error: Throwable): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is java.util.concurrent.CancellationException) return true
+            val text = (current.javaClass.simpleName + " " + (current.message ?: "")).lowercase(Locale.US)
+            if (text.contains("cancel")) return true
+            if (current.cause === current) break
+            current = current.cause
+        }
+        return false
+    }
+
+    private fun formatSigned(value: Double): String {
+        val prefix = if (value > 0) "+" else ""
+        return prefix + formatMoney(value)
+    }
+
     override fun onDestroy() {
-        prefs.edit().putInt("scan_count",scans).putInt("frames_received",frames).putString("last_text",lastText).apply()
-        try { overlay?.let { windowManager?.removeView(it) } } catch (_:Exception) {}
-        display?.release(); reader?.close(); projection?.stop(); recognizer.close(); super.onDestroy()
+        stopping = true
+        try {
+            engine.currentRound()?.let { store.saveActive(it) }
+            store.saveCardState(engine.cardCounter.exportForPersistence())
+            store.setCounters(scans, frames)
+            store.appendStatus("Capture stopped.")
+        } catch (_: Exception) {
+            // Avoid blocking shutdown on persistence errors.
+        }
+        try {
+            overlay?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) {
+            // overlay already removed
+        }
+        try {
+            display?.release()
+        } catch (_: Exception) {
+            // ignore
+        }
+        try {
+            reader?.close()
+        } catch (_: Exception) {
+            // ignore
+        }
+        try {
+            projection?.stop()
+        } catch (_: Exception) {
+            // ignore
+        }
+        try {
+            recognizer.close()
+        } catch (_: Exception) {
+            // ignore
+        }
+        executor.shutdown()
+        super.onDestroy()
     }
-    override fun onBind(intent:Intent?):IBinder?=null
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        private const val CHANNEL = "gx_capture"
+        private const val NOTIFICATION_ID = 7
+    }
 }

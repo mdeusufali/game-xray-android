@@ -11,8 +11,8 @@ android {
         applicationId = "com.gamexray.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.2.0"
+        versionCode = 12
+        versionName = "0.3.0"
     }
 
     signingConfigs {
@@ -40,4 +40,5 @@ android {
 
 dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    testImplementation("junit:junit:4.13.2")
 }
