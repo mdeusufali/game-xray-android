@@ -15,6 +15,8 @@ import kotlin.math.min
  * unsupported/ambiguous layouts return an uncertain result, never a fabricated
  * card count. Real-game screenshots are still required to calibrate/validate it.
  */
+data class VisualWinnerSignal(val candidate: String, val detail: String)
+
 data class SideCardCounts(
     val andar: Int?,
     val bahar: Int?,
@@ -26,6 +28,49 @@ data class SideCardCounts(
 
 object ScreenCardAnalyzer {
     private data class Candidate(val rect: Rect, val score: Double)
+
+    fun winnerHighlightCandidate(bitmap: Bitmap, lines: List<Text.Line>): VisualWinnerSignal {
+        var andar: Rect? = null
+        var bahar: Rect? = null
+        for (line in lines) {
+            val box = line.boundingBox ?: continue
+            val text = line.text.uppercase()
+            if (andar == null && Regex("\\bANDAR\\b").containsMatchIn(text)) andar = Rect(box)
+            if (bahar == null && (Regex("\\bBAHAR\\b").containsMatchIn(text) || Regex("\\bBOHAR\\b").containsMatchIn(text))) bahar = Rect(box)
+        }
+        if (andar == null || bahar == null) return VisualWinnerSignal("RESULT_NOT_DETECTED", "Both side labels are not visible")
+        fun luminanceAround(anchor: Rect): Double {
+            val cx = anchor.centerX(); val cy = anchor.centerY()
+            val left = (cx - anchor.width() * 2).coerceAtLeast(0)
+            val right = (cx + anchor.width() * 2).coerceAtMost(bitmap.width - 1)
+            val top = (cy - anchor.height() * 2).coerceAtLeast(0)
+            val bottom = (cy + anchor.height() * 2).coerceAtMost(bitmap.height - 1)
+            var sum = 0L; var n = 0
+            val stepX = max(1, (right - left) / 20)
+            val stepY = max(1, (bottom - top) / 12)
+            var y = top
+            while (y <= bottom) {
+                var x = left
+                while (x <= right) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 255; val g = (c shr 8) and 255; val b = c and 255
+                    sum += (0.299 * r + 0.587 * g + 0.114 * b).toLong()
+                    n++
+                    x += stepX
+                }
+                y += stepY
+            }
+            return if (n == 0) 0.0 else sum.toDouble() / n
+        }
+        val a = luminanceAround(andar!!)
+        val b = luminanceAround(bahar!!)
+        val difference = a - b
+        return when {
+            abs(difference) < 18.0 -> VisualWinnerSignal("RESULT_NOT_DETECTED", "No clear side brightness difference")
+            difference > 0 -> VisualWinnerSignal("VISUAL_WINNER_CANDIDATE", "Andar area is brighter (not confirmed; animation/layout may affect it)")
+            else -> VisualWinnerSignal("VISUAL_WINNER_CANDIDATE", "Bahar area is brighter (not confirmed; animation/layout may affect it)")
+        }
+    }
 
     fun analyze(bitmap: Bitmap, lines: List<Text.Line>): SideCardCounts {
         val anchors = findAnchors(lines, bitmap.width, bitmap.height)
