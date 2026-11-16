@@ -218,7 +218,7 @@ class CaptureService : Service() {
         if (baharTotal != "not detected") moneyEditor.putString("last_bahar_panel_total", baharTotal)
         moneyEditor.apply()
         if (stage != "NOT DETECTED") lastStage = stage
-        updateRoundState(stage, winner, raw)
+        updateRoundState(stage, winner, raw, visualCards, andarTotal, baharTotal, dealt)
         val sum = if (andarTotal != "not detected" && baharTotal != "not detected") formatNum(andarTotal.toDouble()+baharTotal.toDouble()) else "not detected"
         val snapshot = "STAGE: $stage\nROUND PHASE: $roundPhase\nROUND ID: $roundId\nANDAR PANEL: $andarPanel\nBAHAR PANEL: $baharPanel\nANDAR PANEL TOTAL: $andarTotal\nBAHAR PANEL TOTAL: $baharTotal\nANDAR TOTAL CHANGE: $andarDelta\nBAHAR TOTAL CHANGE: $baharDelta\nPANEL SUM: $sum\nODDS: Andar 1:$oddsA | Bahar 1:$oddsB\nCARDS DEALT (OCR): $dealt\nANDAR CARDS (VISUAL): ${visualCards.andar?.toString() ?: "UNCERTAIN"}\nBAHAR CARDS (VISUAL): ${visualCards.bahar?.toString() ?: "UNCERTAIN"}\nTOTAL CARD REGIONS (VISUAL): ${visualCards.total?.toString() ?: "UNCERTAIN"}\nCARD DETECTION: ${visualCards.confidence}\nVISIBLE TOTAL STAKE TEXT: $visibleStakeLabel\nHISTORY PERCENTAGES: $pct\nHISTORY RAW: $histLine\nEXPLICIT WINNER: $winner\nOCR RAW: $raw"
         if (snapshot != lastText) { lastText = snapshot; saveSnapshot(snapshot) }
@@ -226,7 +226,15 @@ class CaptureService : Service() {
         status?.post { status?.text = "Frames: $frames | Scans: $scans\n$stage • round $roundId\nAndar money: $andarTotal (Δ $andarDelta) • Bahar money: $baharTotal (Δ $baharDelta)\nCards dealt: $dealt\nAndar cards: ${visualCards.andar?.toString() ?: "?"} • Bahar cards: ${visualCards.bahar?.toString() ?: "?"}\nCard scan: ${visualCards.confidence}\nWinner: $winner" }
     }
 
-    private fun updateRoundState(stage: String, winner: String, raw: String) {
+    private fun updateRoundState(
+        stage: String,
+        winner: String,
+        raw: String,
+        visualCards: SideCardCounts,
+        andarTotal: String,
+        baharTotal: String,
+        cardsDealt: String
+    ) {
         // PLACE BET after LOCKED is the next round boundary. If no explicit
         // winner was seen, leave the previous round unrecorded rather than guessing.
         // Repeated PLACE BET frames during BETTING keep the same round ID.
@@ -262,7 +270,15 @@ class CaptureService : Service() {
             } else null
             rounds.put(JSONObject().put("id", roundId).put("time", System.currentTimeMillis())
                 .put("winner", winner).put("source", "explicit same-line OCR result")
-                .put("mySide", side).put("myStake", personalStake).put("myOdds", personalOdds).put("pnl", pnl ?: JSONObject.NULL))
+                .put("cardsDealt", cardsDealt)
+                .put("andarCards", visualCards.andar ?: JSONObject.NULL)
+                .put("baharCards", visualCards.bahar ?: JSONObject.NULL)
+                .put("totalCardRegions", visualCards.total ?: JSONObject.NULL)
+                .put("cardDetection", visualCards.confidence)
+                .put("andarPanelTotal", andarTotal)
+                .put("baharPanelTotal", baharTotal)
+                .put("mySide", side).put("myStake", personalStake).put("myOdds", personalOdds)
+                .put("pnl", pnl ?: JSONObject.NULL))
             val keep = JSONArray()
             for (i in (rounds.length() - 499).coerceAtLeast(0) until rounds.length()) keep.put(rounds.getJSONObject(i))
             prefs.edit().putString("rounds", keep.toString()).putInt("round_count", keep.length())
