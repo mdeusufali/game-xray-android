@@ -323,6 +323,7 @@ class CaptureService : Service() {
             append("Cards A=").append(round?.andarCards ?: 0)
                 .append(" B=").append(round?.baharCards ?: 0)
                 .append(" total=").append(round?.totalCards ?: 0)
+                .append(" (CV lower bound)")
                 .append(" | OCR dealt=").append(round?.cardsDealtOcr ?: "NOT DETECTED").append('\n')
             append("Andar ").append(money(round?.andarMoney?.current))
                 .append(if (round?.andarMoney?.status == com.gamexray.app.core.DetectionStatus.DETECTED) "" else " (${round?.andarMoney?.status?.label ?: "NOT DETECTED"})")
