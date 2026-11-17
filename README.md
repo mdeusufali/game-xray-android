@@ -172,7 +172,8 @@ on-device and are not uploaded by this app.
   `CARDS DEALT` OCR is displayed separately and manual zones are configurable. Exact per-side
   visual counts on heavily overlapped rows are not claimed as verified.
 - Panel totals and odds depend on the game's actual labels and OCR quality. Ambiguous values stay
-  unavailable rather than being guessed.
+  unavailable rather than being guessed. Money deltas are only available after a reliable labeled
+  total has been recognized in consecutive frames.
 - A winner is confirmed only from repeated explicit result wording or OCR/visual agreement. A
   visual-only highlight is shown as a candidate and never used for P/L. A visual highlight was
   observed on real frames (red/Bahar and blue/Andar), but OCR wording still decides confirmation.
