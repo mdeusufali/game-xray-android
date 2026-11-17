@@ -291,6 +291,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        AppForeground.appActivityResumed = true
         if (!refreshPosted) {
             refreshPosted = true
             handler.post(refreshRunnable)
@@ -300,6 +301,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        AppForeground.appActivityResumed = false
         handler.removeCallbacks(refreshRunnable)
         refreshPosted = false
         super.onPause()

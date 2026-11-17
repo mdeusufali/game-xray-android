@@ -195,6 +195,9 @@ class CaptureService : Service() {
                 }
                 return
             }
+            // MediaProjection also captures Game X-Ray itself. Frames showing our own settings or
+            // diagnostics must never feed the parser or the round state machine.
+            if (AppForeground.appActivityResumed || isOwnUiText(text.text)) return
             scans++
             val ocrFrame = AndroidVision.ocrFrame(text, ocrBitmap.width, ocrBitmap.height, timestamp)
 
@@ -463,6 +466,20 @@ class CaptureService : Service() {
     private fun formatMoney(value: Double): String =
         if (value % 1.0 == 0.0) value.toLong().toString()
         else String.format(Locale.US, "%.2f", value)
+
+    /** Extra guard for the case where the lifecycle flag is stale (e.g. an overlaying Activity). */
+    private fun isOwnUiText(raw: String): Boolean {
+        val u = raw.uppercase(Locale.US)
+        val markers = arrayOf(
+            "MY BET SETTINGS",
+            "CARD ZONES",
+            "LATEST RAW OCR TEXT",
+            "DIAGNOSTIC LOG",
+            "KNOWN LIMITATION",
+            "SAVE MY BET SETTINGS"
+        )
+        return markers.count { u.contains(it) } >= 2
+    }
 
     /** ML Kit reports "Task is already canceled" while capture is being stopped on purpose. */
     private fun isCancellation(error: Throwable): Boolean {

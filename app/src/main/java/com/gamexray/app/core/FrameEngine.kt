@@ -57,6 +57,14 @@ class FrameEngine(
             winnerDetector.reset()
         }
 
+        // A locked round stays eligible for visual result evidence even on frames where the game
+        // briefly hides BET LOCKED (payout animations) or OCR misses the stage line.
+        val effectiveBettingStage = if (roundManager.current()?.isBetLocked == true) {
+            BettingStage.BETTING_LOCKED
+        } else {
+            parsed.bettingStage
+        }
+
         // During an open betting period any visible card belongs to the previous round or to a
         // transition animation. Ignoring candidates until the bet locks is the round-start grace
         // period; it prevents stale cards from being counted into the new round.
@@ -68,7 +76,7 @@ class FrameEngine(
         val cards = cardCounter.update(countableCandidates)
         val visual = visualTracker.observe(
             stats = visualStats,
-            bettingStage = parsed.bettingStage,
+            bettingStage = effectiveBettingStage,
             cardsPresent = cards.totalCount > 0
         )
         val winner = winnerDetector.evaluate(parsed.ocrWinner, visual)

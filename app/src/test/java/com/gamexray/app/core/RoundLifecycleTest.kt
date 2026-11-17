@@ -263,4 +263,23 @@ class RoundLifecycleTest {
         assertTrue(later.roundUpdate.finalizedRecords.isEmpty())
         assertTrue(engine.roundManager.current()!!.id != record.id)
     }
+
+    @Test
+    fun lockedRoundKeepsVisualEligibilityWhenStageTextDisappears() {
+        val engine = newEngine()
+        val stats = mapOf(
+            Side.ANDAR to visualStats(Side.ANDAR, 120.0, 80.0, 80.0, 80.0),
+            Side.BAHAR to visualStats(Side.BAHAR, 120.0, 80.0, 80.0, 80.0)
+        )
+        engine.process(openFrame(1_000L), emptyList(), stats, BetSettings())
+        engine.process(lockedFrame(2_000L), emptyList(), stats, BetSettings())
+
+        // Payout animations often hide BET LOCKED, and OCR can miss the stage line entirely.
+        val noStageText = ocrFrame(timestamp = 3_000L)
+        val analysis = engine.process(noStageText, emptyList(), stats, BetSettings())
+
+        assertEquals(BettingStage.NOT_DETECTED, analysis.parsed.bettingStage)
+        assertTrue(analysis.round!!.isBetLocked)
+        assertNotEquals("betting open; visual result evidence ignored", analysis.visual.reason)
+    }
 }
