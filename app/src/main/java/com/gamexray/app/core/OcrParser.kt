@@ -130,9 +130,11 @@ class OcrParser {
         return "NOT DETECTED"
     }
 
+    private data class LabelCandidate(val side: Side, val line: OcrLine, val score: Float)
+
     private fun findSideLabels(lines: List<OcrLine>): List<Pair<Side, OcrLine>> {
-        val out = mutableListOf<Pair<Side, OcrLine>>()
         val rangeRow = Regex("\\b\\d{1,2}\\s*[-–]\\s*\\d{1,2}\\b|\\b\\d{1,2}\\s*\\+")
+        val candidates = mutableListOf<LabelCandidate>()
         for (line in lines) {
             val u = canonicalText(line.text)
             val side = lineSide(u)
@@ -144,19 +146,45 @@ class OcrParser {
             ) continue
             val refined = refineSideLabel(line, side)
             if (refined.box.width > 0.46f || refined.box.height > 0.10f) continue
-            out.add(side to refined)
+            val clean = canonicalText(refined.text)
+            var score = refined.confidence * 10f
+            if (lineSide(clean) == side) score += 50f
+            if (clean == side.label) score += 100f
+            if (refined.box.width <= 0.22f) score += 10f
+            candidates.add(LabelCandidate(side, refined, score))
         }
-        // Prefer a clean, tight label over a line that merely contains the side name.
-        return out.sortedWith(
-            compareByDescending<Pair<Side, OcrLine>> {
-                val u = canonicalText(it.second.text)
-                var score = it.second.confidence * 10f
-                if (lineSide(u) == it.first) score += 50f
-                if (u == it.first.label) score += 100f
-                if (it.second.box.width <= 0.22f) score += 10f
-                score
-            }.thenBy { it.second.box.area }
-        )
+        val byConfidence = compareByDescending<LabelCandidate> { it.score }
+            .thenBy { it.line.box.area }
+        // Preserve the old single-label behaviour when one side is completely absent.
+        if (candidates.none { it.side == Side.ANDAR } || candidates.none { it.side == Side.BAHAR }) {
+            return candidates.sortedWith(byConfidence).map { it.side to it.line }
+        }
+
+        // Select the two labels as a unit. Choosing the best ANDAR and the best BAHAR
+        // independently can mix a real card-row label with a tiny side name printed inside the
+        // statistics table. That produces a diagonal, geometrically impossible pair and sends
+        // the zone locator down the wrong fallback path.
+        var best: Pair<LabelCandidate, LabelCandidate>? = null
+        var bestScore = Float.NEGATIVE_INFINITY
+        for (a in candidates.filter { it.side == Side.ANDAR }) {
+            for (b in candidates.filter { it.side == Side.BAHAR }) {
+                var score = a.score + b.score
+                score += when {
+                    labelsAreSideBySide(a.line, b.line) -> 80f
+                    labelsAreStacked(a.line, b.line) -> 80f
+                    else -> -120f
+                }
+                // Real card-row labels are printed noticeably larger than the small side names
+                // used as statistics-table headings.
+                score += (minOf(a.line.box.height, b.line.box.height) * 200f).coerceAtMost(20f)
+                if (score > bestScore) {
+                    bestScore = score
+                    best = a to b
+                }
+            }
+        }
+        val pair = best ?: return emptyList()
+        return listOf(pair.first.side to pair.first.line, pair.second.side to pair.second.line)
     }
 
     private fun refineSideLabel(line: OcrLine, side: Side): OcrLine {

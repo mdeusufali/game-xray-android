@@ -431,8 +431,8 @@ object CardZoneLocator {
             )
         }
 
-        // Real layout: the row labels are stacked on the right of the table. The Andar row is
-        // the band above the labels' midpoint and Bahar is the band below it.
+        // Mirrored layout: row labels are stacked on the right of the table. Keep the tuned
+        // split so the two bands share a clean boundary.
         if (a != null && b != null &&
             a.box.centerX > 0.5f && b.box.centerX > 0.5f &&
             a.box.centerY < b.box.centerY
@@ -447,13 +447,35 @@ object CardZoneLocator {
             )
         }
 
-        // The only labels may be the big side-panel labels on the left. Their card rows still
-        // follow the same known real layout; a manual override can replace this safely.
+        // The real game stacks ANDAR above BAHAR in the left column, with each card row extending
+        // to the right of its label. Derive narrow row bands from the actual label boxes instead
+        // of the old hardcoded layout, which sat far above the real rows and missed most cards.
+        if (a != null && b != null && labelsAreStacked(a, b) &&
+            a.box.centerX < 0.5f && b.box.centerX < 0.5f
+        ) {
+            val zoneLeft = (maxOf(a.box.right, b.box.right) + 0.01f).coerceIn(0.30f, 0.62f)
+            val zoneRight = 0.88f
+            val gap = abs(a.box.centerY - b.box.centerY)
+            val rowHeight = (gap * 0.95f).coerceIn(0.07f, 0.18f)
+            fun band(line: OcrLine) = Box(
+                zoneLeft,
+                (line.box.centerY - rowHeight / 2f).coerceAtLeast(0.05f),
+                zoneRight,
+                (line.box.centerY + rowHeight / 2f).coerceAtMost(0.95f)
+            )
+            return CardZones(
+                andar = band(a),
+                bahar = band(b),
+                source = "auto from stacked row labels"
+            )
+        }
+
+        // Two left-column labels that are too far apart horizontally to be a clean stack. Keep
+        // the known layout as a last resort, but flag the zone so diagnostics can be verified.
         if (a != null && b != null && a.box.centerY < b.box.centerY &&
             listOf(a, b).all { it.box.centerX < 0.5f }
         ) {
-            val fallback = realLayoutZones()
-            return fallback.copy(
+            return realLayoutZones().copy(
                 source = "auto fallback real layout; verify card counts"
             )
         }

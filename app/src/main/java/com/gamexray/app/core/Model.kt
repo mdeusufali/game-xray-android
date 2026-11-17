@@ -108,7 +108,24 @@ fun labelsAreSideBySide(a: OcrLine?, b: OcrLine?): Boolean {
     if (a == null || b == null) return false
     val dx = abs(a.box.centerX - b.box.centerX)
     val dy = abs(a.box.centerY - b.box.centerY)
-    return dx >= 0.10f && dx > dy * 0.75f
+    // Genuine side panels sit at roughly the same height. A large dy means the two labels
+    // merely happen to be on opposite halves of the screen (e.g. a card-row label and a
+    // side name printed inside the statistics table), which must not be treated as a split.
+    val rowTolerance = maxOf(0.05f, maxOf(a.box.height, b.box.height) * 2f)
+    return dx >= 0.10f && dy <= rowTolerance
+}
+
+/**
+ * True when both labels sit in the same column with one clearly above the other — the stacked
+ * card-row layout used by the real game. This is a stronger signal than raw confidence: a tiny
+ * side name inside the statistics table can score higher than the real card-row label.
+ */
+fun labelsAreStacked(a: OcrLine?, b: OcrLine?): Boolean {
+    if (a == null || b == null) return false
+    val dx = abs(a.box.centerX - b.box.centerX)
+    val dy = abs(a.box.centerY - b.box.centerY)
+    val columnTolerance = maxOf(0.07f, maxOf(a.box.width, b.box.width) * 0.5f)
+    return dy >= 0.012f && dx <= columnTolerance
 }
 
 /** Full OCR result. rawText is kept separate from the positioned line data. */

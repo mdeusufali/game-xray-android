@@ -184,6 +184,27 @@ class CardDetectionTest {
     }
 
     @Test
+    fun zoneLocatorDerivesCardRowsFromStackedLeftLabels() {
+        // Same label boxes as the diagnostic log. The previous fallback used a hardcoded
+        // 0.224..0.378 band that sat well above the real card rows and counted almost no cards.
+        val parsed = OcrParser().parse(
+            ocrFrame(
+                ocrLine("ANDAR", 0.139f, 0.469f, 0.336f, 0.492f, 0.84f),
+                ocrLine("BAHAR", 0.143f, 0.585f, 0.336f, 0.605f, 0.73f)
+            )
+        )
+        val zones = CardZoneLocator.locate(parsed)
+        assertNotNull(zones.andar)
+        assertNotNull(zones.bahar)
+        assertEquals("auto from stacked row labels", zones.source)
+        assertTrue(zones.andar!!.left > 0.33f)
+        assertTrue(zones.bahar!!.left > 0.33f)
+        assertTrue(zones.andar!!.top > 0.40f)
+        assertTrue(zones.andar!!.bottom < zones.bahar!!.top)
+        assertTrue(zones.bahar!!.centerY > 0.55f)
+    }
+
+    @Test
     fun visualStatsChangeWhenRegionBecomesBrighter() {
         val dark = imageWithRects(400, 800, emptyList())
         val bright = imageWithRects(

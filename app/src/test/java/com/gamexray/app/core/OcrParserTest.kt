@@ -136,6 +136,27 @@ class OcrParserTest {
     }
 
     @Test
+    fun selectsGeometricallyConsistentSideLabelPair() {
+        // Boxes copied from a real diagnostic log: the real stacked card-row labels are on the
+        // left, while a tiny "BAHAR" heading inside the statistics table scores higher on OCR
+        // confidence. The parser must pick the consistent pair, not the two best single labels.
+        val parsed = parser.parse(
+            ocrFrame(
+                ocrLine("ANDAR", 0.139f, 0.469f, 0.336f, 0.492f, 0.84f),
+                ocrLine("BAHAR", 0.143f, 0.585f, 0.336f, 0.605f, 0.73f),
+                ocrLine("BAHAR", 0.707f, 0.331f, 0.778f, 0.339f, 0.88f)
+            )
+        )
+        assertNotNull(parsed.andarLabel)
+        assertNotNull(parsed.baharLabel)
+        assertEquals(0.139f, parsed.andarLabel!!.box.left, 0.005f)
+        assertEquals(0.469f, parsed.andarLabel!!.box.top, 0.005f)
+        assertEquals(0.143f, parsed.baharLabel!!.box.left, 0.005f)
+        assertEquals(0.585f, parsed.baharLabel!!.box.top, 0.005f)
+        assertEquals(2, parsed.sideLabelLines.size)
+    }
+
+    @Test
     fun detectsWinnerWordingPerSide() {
         val andar = parser.parse(
             ocrFrame(ocrLine("ANDAR WINS", 0.08f, 0.60f, 0.42f, 0.65f))
